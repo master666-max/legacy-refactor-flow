@@ -71,6 +71,34 @@ git clone https://github.com/master666-max/legacy-refactor-flow.git "$HOME/.dsh/
 | `references/REFACTOR-RUNBOOK.md` | 完整作战手册：阶段细节、出口条件、按语言工具矩阵、提示词模板 |
 | `references/COMMUNITY-MAP.md` | 社区已有方法与流程图、现成工具地图、与 aim42 的对应关系 |
 | `references/EXAMPLE-recon-report.md` | 侦察脚本的真实输出样例 |
+| `tests/run-all.ps1` | 一次跑完三个自检，任一非零即整体非零 |
+| `tests/check-encoding.ps1` | 编码不变量：每个 `.ps1` 恰好一个 BOM、自带码页守卫；含**哨兵** |
+| `tests/check-ledger-lifecycle.ps1` | 台账工具 14 步全生命周期，含"没拆必须拦"的反向用例 |
+| `tests/check-recon.ps1` | 侦察报告 12 条断言，期望值写死在自检里、不取自被测输出 |
+
+## 自检
+
+```powershell
+powershell -NoProfile -File tests/run-all.ps1     # 中文 Windows + PS 5.1，最有意义的一档
+pwsh -NoProfile -File tests/run-all.ps1           # 也可以；但在 Windows 上它仍用 powershell 5.1 起子进程
+```
+
+`run-all` 在 Windows 上一律用 `powershell`（5.1）起子进程——编码故障只在该环境成立，宿主是 pwsh 也不例外。非 Windows 才退到 `pwsh`，此时编码哨兵无从复现，会记 SKIP 而不是假装通过。
+
+三个自检都在 `%TEMP%` 里造一次性沙箱跑，**不碰你的仓库**，跑完即删（加 `-KeepSandbox` 保留现场）。
+
+自检本身也要能被证伪，否则就是恒真的绿灯。三条反向对照（本机实测）：
+
+| 破坏什么 | 应红 | 实测 |
+|---|---|---|
+| 拿 v1.0 的 `phase0-recon` 喂 `check-recon` | 语言名/体量表/热力污染/目录噪声/子项目配置/中文提交信息 逐条翻红 | 8 红，rc=1 |
+| 把 `hooks-ledger` 的 `-Verify` 改成永远报绿 | "未拆除应拦"两条反向用例红 | 恰好 2 红，其余 16 项仍绿，rc=1 |
+| 剥掉仓内任一 `.ps1` 的 BOM | 编码自检红 | 1 红，rc=1 |
+
+两个坑值得写下来，因为它们都会把判据悄悄做成恒真：
+
+- **码页污染**：`[Console]::OutputEncoding = UTF8` 作用在**整个控制台**而非单进程，后起的子进程会继承它。所以"中文对不对"不能拿当前码页现值当基线——`check-recon` 改从注册表 `…\Nls\CodePage\OEMCP` 取机器出厂码页，用一层壳把它钉回去再测；`check-ledger-lifecycle` 则只断言退出码与条数，中文交由 `check-encoding` 按字节查。
+- **夹具自证**：登记-验证类用例必须确证"改写后的文件与备份哈希真的不同"，否则 `-Verify` 报"已还原"是真话，测了个空。`check-ledger-lifecycle` 在开头就量这个，不同才继续。
 
 ## 依赖
 
@@ -101,9 +129,9 @@ git clone https://github.com/master666-max/legacy-refactor-flow.git "$HOME/.dsh/
 | 4 | 变更热力表被 java 报错文本污染 | `-c git2` 解析器对本版 jar 不可用；且脚本把报错当 CSV 数据采信 | 报错文本被当"最频繁变更的文件"写进报告 |
 | 5 | 「一级目录」表混进 `.git` / `dist` / `build` | 噪声正则要求尾随分隔符，根级目录漏网 | 模块切分候选被噪声占位 |
 | 6 | 仓库里有 5 套测试却报「未检测到任何测试/构建配置 —— 从零开始造裁判」 | 只查根目录，不看子项目 | **把错误结论直接写进报告**，monorepo 尤甚 |
-| 7 | 中文提交信息与脚本自身输出在管道/重定向下乱码 | PS 5.1 按控制台 OEM 代码页解码子进程输出、编码自身输出 | 报告中文不可读；`-Verify` 的回执给 agent 读是乱码，"证据是脚本输出"这条铁律落空 |
+| 7 | 中文提交信息与脚本自身输出在管道/重定向下乱码 | 控制台码页（本机 = 936）决定了两件事：PS 5.1 **与 pwsh 7 都**按它解码子进程输出，也按它编码自己的输出（初版把根因窄写成"PS 5.1"，是仓内 `check-recon` 的 R6 反向对照把它纠正的：钉回出厂码页后 v1.0 在两个解释器下都现出乱码） | 报告中文不可读；`-Verify` 的回执给 agent 读是乱码，"证据是脚本输出"这条铁律落空 |
 
-**怎么验的**：`hooks-ledger.ps1` 的 14 步生命周期（干净态 → 登记 → 未拆应拦 → 预演 → `-Apply` → 拆后应绿 → 扫描）在 PS 5.1 与 pwsh 7.6 下各跑一遍全对；`phase0-recon.ps1` 用**同一目标仓、同一解释器**跑 v1.0/v1.1 对照，第 2~7 项逐条翻正（如语言名空行 13→0、体量表 0→20 行、java 报错污染 3→0、噪声目录 build/dist/.git→无、测试设施"从零开始"→检出 5 处）。
+**怎么验的**：`hooks-ledger.ps1` 的 14 步生命周期（干净态 → 登记 → 未拆应拦 → 预演 → `-Apply` → 拆后应绿 → 扫描）在 PS 5.1 与 pwsh 7.6 下各跑一遍全对；`phase0-recon.ps1` 用**同一目标仓、同一解释器**跑 v1.0/v1.1 对照，第 2~7 项逐条翻正（如语言名空行 13→0、体量表 0→20 行、java 报错污染 3→0、噪声目录 build/dist/.git→无、测试设施"从零开始"→检出 5 处）。这些验证已固化成仓内 `tests/`，不必再信我的一面之词——见下面「自检」。
 
 ### v1.0（2026-09-24）
 
