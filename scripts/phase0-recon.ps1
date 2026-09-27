@@ -30,8 +30,17 @@ if (-not (Test-Path -LiteralPath $RepoPath)) { throw "路径不存在: $RepoPath
 $root = (Resolve-Path -LiteralPath $RepoPath).Path
 $nl = [Environment]::NewLine
 $tick = [char]96
-$bs = [char]92
-$fs = [char]47
+
+# 把绝对路径削成相对 $root 的形式：scc 的 Files[].Location 是绝对路径，而内置兜底给的是相对的，
+# 同一列两种口径会让报告里的"相对路径"名不副实。大小写不敏感比对（Windows 上路径不分大小写）。
+function Get-Rel([string]$p) {
+    if (-not $p) { return "" }
+    $a = $p.Replace('\', '/'); $b = $root.Replace('\', '/')
+    if ($a.Length -gt $b.Length -and [string]::Compare($a.Substring(0, $b.Length), $b, [StringComparison]::OrdinalIgnoreCase) -eq 0) {
+        $a = $a.Substring($b.Length)
+    }
+    return $a.TrimStart('/')
+}
 Write-Host "[recon] root = $root"
 
 # ---------- 0. 工具探测 ----------
@@ -70,7 +79,7 @@ if ($tools['scc']) {
             if ($e.Name -eq 'Total') { continue }
             $langRows.Add([pscustomobject]@{ Name = $e.Name; Files = $e.Count; Lines = $e.Lines; Code = $e.Code; Cx = $e.Complexity })
             $totalLines += [int]$e.Lines
-            if ($e.Files) { foreach ($f in $e.Files) { $fileRows.Add([pscustomobject]@{ Rel = $f.Location; Lines = (([int]$f.Code) + ([int]$f.Comment) + ([int]$f.Blank)); Cx = $f.Complexity }) } }
+            if ($e.Files) { foreach ($f in $e.Files) { $fileRows.Add([pscustomobject]@{ Rel = (Get-Rel $f.Location); Lines = (([int]$f.Code) + ([int]$f.Comment) + ([int]$f.Blank)); Cx = $f.Complexity }) } }
         }
         $statSource = "scc"
     } catch { $statSource = "内置兜底" }
@@ -114,7 +123,7 @@ if ($statSource -eq "内置兜底") {
         $agg[$ext].Files++
         $agg[$ext].Lines += $n
         $totalLines += $n
-        $fileRows.Add([pscustomobject]@{ Rel = $f.FullName.Replace($root, "").TrimStart($bs, $fs); Lines = $n; Cx = $null })
+        $fileRows.Add([pscustomobject]@{ Rel = (Get-Rel $f.FullName); Lines = $n; Cx = $null })
     }
     foreach ($k in $agg.Keys) { $langRows.Add([pscustomobject]@{ Name = $k; Files = $agg[$k].Files; Lines = $agg[$k].Lines; Code = $agg[$k].Lines; Cx = $null }) }
 }
@@ -229,7 +238,7 @@ if ($infra.Count -gt 0) { $L.Add("检测到：" + ($infra -join ", ")) } else { 
 $L.Add("")
 $L.Add("## 6. 入口点候选")
 $L.Add("")
-if ($entries.Count -gt 0) { foreach ($e in ($entries | Select-Object -First 25)) { $L.Add("- " + $tick + $e.FullName.Replace($root, "").TrimStart($bs, $fs) + $tick) } } else { $L.Add("（未按常见命名匹配到，需手工枚举 CLI / HTTP 路由 / cron）") }
+if ($entries.Count -gt 0) { foreach ($e in ($entries | Select-Object -First 25)) { $L.Add("- " + $tick + (Get-Rel $e.FullName) + $tick) } } else { $L.Add("（未按常见命名匹配到，需手工枚举 CLI / HTTP 路由 / cron）") }
 $L.Add("")
 $L.Add("## 7. 一级目录（模块切分候选）")
 $L.Add("")

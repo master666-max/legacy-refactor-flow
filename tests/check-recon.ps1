@@ -50,6 +50,12 @@ function W($rel, $text) {
 }
 
 $pass = 0; $bad = 0; $skip = 0
+# git 的警告与进度一律往 stderr 写；`core.autocrlf=true`（Git for Windows 默认档）下 `add` 必报
+# CRLF 警告，会把 ErrorActionPreference=Stop 的 harness 当场掀翻。所有 git 调用统一走这层包装。
+function G([string[]]$ga) {
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { return (& git @ga 2>&1 | Out-String) } finally { $ErrorActionPreference = $prev }
+}
 function Chk($name, $hit, $detail) {
     if ($hit) { Write-Host ("  [OK] {0,-26} {1}" -f $name, $detail); $script:pass++ }
     else { Write-Host ("  [X ] {0,-26} {1}" -f $name, $detail); $script:bad++ }
@@ -77,11 +83,14 @@ try {
     $gitExe = Get-Command git -ErrorAction SilentlyContinue
     $hasGit = $false
     if ($gitExe) {
-        & git init -q $repo 2>&1 | Out-Null
-        & git -C $repo add -A 2>&1 | Out-Null
+        # 显式关掉 autocrlf：Git for Windows 默认 true 会在 add 时往 stderr 报 CRLF 警告，
+        # 也会让"报告里那条路径是相对还是绝对"这类判据掺进换行符噪声。靶仓要与真仓声明这一处不同。
+        $ac = @('-c','core.autocrlf=false')
+        G (@('init','-q',$repo)) | Out-Null
+        G ($ac + @('-C',$repo,'add','-A')) | Out-Null
         $msgFile = Join-Path $sb "commit-msg.txt"
         [System.IO.File]::WriteAllText($msgFile, $EXP_CN_COMMIT + "`n", (New-Object System.Text.UTF8Encoding($false)))
-        & git -C $repo -c user.email=t@t -c user.name=t commit -q -F $msgFile 2>&1 | Out-Null
+        G ($ac + @('-C',$repo,'-c','user.email=t@t','-c','user.name=t','commit','-q','-F',$msgFile)) | Out-Null
         if ($LASTEXITCODE -eq 0) { $hasGit = $true }
     }
     if (-not $hasGit) { Write-Host "  !! git 不可用：热力与提交信息两条断言只能 SKIP" }
@@ -175,6 +184,17 @@ try {
     try { [System.Text.Encoding]::GetEncoding('utf-8', [System.Text.EncoderFallback]::ExceptionFallback, [System.Text.DecoderFallback]::ExceptionFallback).GetString($bytes) | Out-Null }
     catch { $strict = $false }
     Chk 'R7 严格 UTF-8 解码' $strict "$($bytes.Length) 字节"
+
+    # R8 表头写"相对路径"，内容就必须真是相对的：不得带盘符、不得以 / 开头、不得含根目录前缀
+    #     （v1.1 之前 scc 分支直接把 Location 塞进去，那是绝对路径 —— 列名与内容对不上）
+    $rootN = $repo.Replace('\', '/')
+    $paths = @()
+    foreach ($r in (Rows (Sec 2))) { if ($r -match '`([^`]+)`') { $paths += $matches[1] } }
+    foreach ($r in (Sec 6 -split "`r?`n")) { if ($r -match '^-\s+`([^`]+)`') { $paths += $matches[1] } }
+    $abs = @($paths | Where-Object { $_ -match '^[A-Za-z]:' -or $_.StartsWith('/') -or $_ -like "*$rootN*" })
+    Chk 'R8 路径列名副其实' ($abs.Count -eq 0 -and $paths.Count -gt 0) ("共 $($paths.Count) 条，绝对/带根前缀 $($abs.Count) 条$(if($abs.Count){'：'+(($abs|Select-Object -First 2) -join ' ')})")
+    # R8b 相对口径要与沙箱一致（正斜杠、不含根）
+    Chk 'R8b 相对形如 src/x' (@($paths | Where-Object { $_ -match '^src[\\/]' }).Count -gt 0) "样本: $(($paths | Select-Object -First 3) -join ' , ')"
 } finally {
     if ($KeepSandbox) { Write-Host "[recon] 沙箱留着：$sb" }
     elseif (Test-Path -LiteralPath $sb) { Remove-Item -LiteralPath $sb -Recurse -Force }

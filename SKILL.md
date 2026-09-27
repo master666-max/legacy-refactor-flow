@@ -3,7 +3,7 @@ name: legacy-refactor-flow
 description: 遗留系统/屎山重构的通用流程，自带强制拆除。当用户说「重构这个屎山」「这项目没人懂也没测试」「遗留代码怎么安全改造」「legacy 怎么现代化」，或面对一个只知大致用途、缺少测试、可能是 AI 生成的代码库需要安全改造时使用。流程：立界→测绘→定活→造裁判→小步改；全过程把创建的持久化钩子登记入台账，收尾时强制拆除并脚本验证，保证不留任何跨会话残留。
 ---
 
-# 遗留系统重构通用流程 v1.1
+# 遗留系统重构通用流程 v1.2
 
 ## 0. 两条铁律
 
@@ -77,20 +77,34 @@ Copy-Item <原文件> <备份路径> -Force
 
 # 4) 通用扫描：不依赖台账，查常见残留物
 ./scripts/hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Sweep -Repo <目标仓库>
+
+#    -Strict：连"[?] 可能是用户本来就有的东西"也判失败，逼你逐项确认完
+./scripts/hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Sweep -Strict -Repo <目标仓库>
 ```
+
+`-Verify` 与 `-Sweep` 收尾各打一行 ASCII 计数（`BAD=/OK=`、`HARD=/CHECK=/UNCOVERED=`）给上层程序读；
+`UNCOVERED` 那几类是**本工具判不了的**，看见它就得当人工的，不许当成"扫过了"。
 
 **拆除完成前不要宣布任务结束。** 交付时必须写清三件事：保留了什么（成果物路径）、拆除了什么、验证输出是什么。
 
 ### 4.1 高频残留物清单（照着核）
 
-- [ ] `.mcp.json` / `mcp.json` / `settings.json` 里的 server 注册
-- [ ] `.git/hooks/` 下除 `.sample` 之外的任何文件
-- [ ] CI 配置（`.github/workflows/*`、`.gitlab-ci.yml`）
-- [ ] `AGENTS.md` / `CLAUDE.md` / `.cursorrules` 被自动追加的段落
-- [ ] 常驻索引或数据库（`.codebase-memory/`、向量库、缓存目录）
-- [ ] daemon / watcher / cron 条目
-- [ ] 环境变量与 shell profile 改动
-- [ ] 后台任务、临时 worktree、临时目录、临时端口
+标 ✅ 的 `-Sweep` 会自动查（算 `[X]` 硬残留或 `[?]` 待确认）；标 ✋ 的它判不了，得人工过一遍。
+
+- [ ] ✅ `.mcp.json` / `mcp.json` / `settings.json` 里的 server 注册 `[?]`
+- [ ] ✅ `.git/hooks/` 下除 `.sample` 之外的任何文件 `[X]`
+- [ ] ✅ `core.hooksPath` 被改指到仓外 `[X]`（只看 `.git/hooks` 目录会整个漏掉这一类）
+- [ ] ✅ 临时 worktree（`git worktree list` 多于一个）`[X]`
+- [ ] ✅ CI 配置（`.github/workflows/*`、`.gitlab-ci.yml`、`azure-pipelines.yml`、`.circleci`、`Jenkinsfile`…）`[?]`
+- [ ] ✅ `AGENTS.md` / `CLAUDE.md` / `.cursorrules` 被自动追加的段落 `[?]`
+- [ ] ✅ 环境变量文件 `.env` / `.env.local` / `.envrc` `[?]`
+- [ ] ✅ 常驻索引或数据库（`.codebase-memory/`、`.serena/`、`.repomap/`、向量库、缓存目录）`[?]`
+- [ ] ✅ 目标仓库 `git status` 的剩余变更 `[?]`
+- [ ] ✋ daemon / watcher 进程
+- [ ] ✋ crontab 与 Windows 计划任务
+- [ ] ✋ 用户级环境变量与 shell profile 改动（在仓外，`-Sweep` 只扫 `-Repo` 一个目录）
+- [ ] ✋ 常驻端口、后台任务、临时 worktree 之外的临时目录
+- [ ] ✋ 跨仓写入（本流程若动过别的仓，得逐仓扫）
 
 ## 5. 工具：有则用，无则降级——别自己写分析脚本
 
@@ -123,3 +137,4 @@ Copy-Item <原文件> <备份路径> -Force
 2. 目标仓库 `git status` 里剩下的，是不是都是用户要的成果物？
 3. 我有没有把「我删过了」当成证据？（证据应该是脚本输出，不是记忆）
 4. 报告里有没有标清楚：哪些数字来自真实运行，哪些是 AI 的推测？
+5. `-Sweep` 打的 `UNCOVERED=` 那几类（daemon / crontab / 用户级环境变量 / 常驻端口 / 跨仓），我人工过了吗？没过的必须在交付里写明「未核」，不许沉默地当 0。

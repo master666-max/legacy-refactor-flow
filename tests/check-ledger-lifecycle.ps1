@@ -33,6 +33,11 @@ $sh = if ($env:OS -eq 'Windows_NT') { 'powershell' } else { 'pwsh' }
 $shArgs = @('-NoProfile','-File')
 if ($env:OS -eq 'Windows_NT') { $shArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File') }
 function HashOf($p) { if (-not (Test-Path -LiteralPath $p)) { return "" }; (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
+# 子进程写 stderr 不该掀翻 harness（git worktree/commit 都爱往 stderr 打进度）
+function G([string[]]$ga) {
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { return (& git @ga 2>&1 | Out-String) } finally { $ErrorActionPreference = $prev }
+}
 $gate = Join-Path (Join-Path (Join-Path $repo '.git') 'hooks') 'pre-commit'
 function Step($want, $name, [string[]]$args_) {
     # 子进程往 stderr 写东西不该把整个 harness 掐死：这里临时放宽，退出码才是判据
@@ -53,9 +58,9 @@ try {
     Set-Content -LiteralPath (Join-Path $repo ".mcp.json") -Value $baseline.TrimEnd() -Encoding ASCII
     $gitExe = Get-Command git -ErrorAction SilentlyContinue
     if ($gitExe) {
-        & git init -q $repo 2>&1 | Out-Null
-        & git -C $repo add -A 2>&1 | Out-Null
-        & git -C $repo -c user.email=t@t -c user.name=t commit -q -m "seed" 2>&1 | Out-Null
+        G @('init','-q',$repo) | Out-Null
+        G @('-C',$repo,'add','-A') | Out-Null
+        G @('-C',$repo,'-c','user.email=t@t','-c','user.name=t','commit','-q','-m','seed') | Out-Null
     }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $gate) | Out-Null
     Set-Content -LiteralPath $gate -Value "#!/bin/sh`necho gate" -Encoding ASCII
@@ -97,6 +102,64 @@ try {
     Remove-Item -LiteralPath $gate -Force
     Step 0  "13 Sweep 清门后应绿"     @('-Ledger', $ledger, '-Sweep','-Repo',$repo) | Out-Null
     Step 2  "14 无子命令给用法"        @('-Ledger', $ledger) | Out-Null
+
+    # ===== 15~20：-Sweep 覆盖面（SKILL.md §4.1 列的 CI / 环境变量 / worktree / hooksPath）=====
+    # 计数一律看**增量**：沙箱里本来就挂着 .mcp.json 等 [?] 项，猜绝对值必错。
+    function Sweep($extra) {
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $txt = & $sh ($shArgs + [string[]]@($Script, '-Ledger', $ledger, '-Sweep', '-Repo', $repo) + [string[]]$extra) 2>&1 | Out-String
+            $rc = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $prev }
+        if ($txt -match 'HARD=(\d+) CHECK=(\d+) UNCOVERED=(\d+)') {
+            return [pscustomobject]@{ rc = $rc; hard = [int]$matches[1]; check = [int]$matches[2]; uncov = [int]$matches[3]; txt = $txt }
+        }
+        return [pscustomobject]@{ rc = -9; hard = -1; check = -1; uncov = -1; txt = $txt }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $repo ".git"))) {
+        Write-Host "  [SKIP] 15~20 需要沙箱 git 仓（本机无 git）"
+    } else {
+        $base = Sweep @()
+        if ($base.hard -ge 0) { Write-Host "  [OK] 15 汇总行可解析（HARD=$($base.hard) CHECK=$($base.check) UNCOVERED=$($base.uncov)）"; $pass++ }
+        else { Write-Host "  [X] 15 Sweep 没打 ASCII 汇总行 HARD=/CHECK=/UNCOVERED= —— 上层无法机器读数"; $bad++ }
+        if ($base.uncov -ge 1) { Write-Host "  [OK] 15b 未覆盖类别被明写（$($base.uncov) 类）"; $pass++ }
+        else { Write-Host "  [X] 15b 未覆盖声明消失 —— 会把'判不了'伪装成'扫过了'"; $bad++ }
+
+        # CI 配置 + 环境变量文件：§4.1 列了，之前一版根本没查
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo ".github\workflows") | Out-Null
+        Set-Content -LiteralPath (Join-Path $repo ".github\workflows\ci.yml") -Value "on: push`njobs: {}" -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $repo ".env") -Value "TOKEN=***" -Encoding ASCII
+        $withCi = Sweep @()
+        if ($withCi.check -gt $base.check) { Write-Host "  [OK] 16 CI/.env 被计入 [?]（$($base.check)→$($withCi.check)）"; $pass++ }
+        else { Write-Host "  [X] 16 种了 CI 配置和 .env，CHECK 却没涨（$($base.check)→$($withCi.check)）—— 这两类仍没被扫"; $bad++ }
+        $strictRun = Sweep @('-Strict')
+        if ($strictRun.rc -eq 1) { Write-Host "  [OK] 17 -Strict 下未确认的 [?] 判失败（rc=1）"; $pass++ }
+        else { Write-Host "  [X] 17 -Strict 没起作用（rc=$($strictRun.rc)）"; $bad++ }
+
+        # core.hooksPath：门被改指到仓外，只看 .git/hooks 会整个漏掉
+        G @('-C',$repo,'config','core.hooksPath',$kit) | Out-Null
+        $withHp = Sweep @()
+        if ($withHp.hard -gt $base.hard -and $withHp.rc -eq 1) { Write-Host "  [OK] 18 core.hooksPath 被算硬残留（HARD=$($withHp.hard), rc=1）"; $pass++ }
+        else { Write-Host "  [X] 18 core.hooksPath 没被逮住（HARD=$($withHp.hard) vs 基线 $($base.hard), rc=$($withHp.rc)）"; $bad++ }
+        G @('-C',$repo,'config','--unset','core.hooksPath') | Out-Null
+
+        # 临时 worktree：§4.1 明列
+        G @('-C',$repo,'worktree','add',"$sb\wt-extra",'-b','wt-extra') | Out-Null
+        $withWt = Sweep @()
+        if ($withWt.hard -gt $base.hard -and $withWt.rc -eq 1) { Write-Host "  [OK] 19 临时 worktree 被算硬残留（HARD=$($withWt.hard), rc=1）"; $pass++ }
+        else { Write-Host "  [X] 19 多出一个 worktree 却没被逮住（HARD=$($withWt.hard) vs $($base.hard), rc=$($withWt.rc)）"; $bad++ }
+        G @('-C',$repo,'worktree','remove',"$sb\wt-extra",'--force') | Out-Null
+        G @('-C',$repo,'branch','-D','wt-extra') | Out-Null
+
+        # 全清干净后必须回到基线，否则上面那些"涨了"的判据没意义
+        Remove-Item -LiteralPath (Join-Path $repo ".env") -Force
+        Remove-Item -LiteralPath (Join-Path $repo ".github") -Recurse -Force
+        G @('-C',$repo,'add','-A') | Out-Null
+        G @('-C',$repo,'-c','user.email=t@t','-c','user.name=t','commit','-q','-m','clean') | Out-Null
+        $after = Sweep @()
+        if ($after.hard -eq 0 -and $after.rc -eq 0) { Write-Host "  [OK] 20 清干净后 HARD=0 且 rc=0"; $pass++ }
+        else { Write-Host "  [X] 20 清完仍报 HARD=$($after.hard) rc=$($after.rc) —— 有判定不会回落"; $bad++ }
+    }
 } finally {
     if ($KeepSandbox) { Write-Host "[lifecycle] 沙箱留着：$sb" }
     elseif (Test-Path -LiteralPath $sb) { Remove-Item -LiteralPath $sb -Recurse -Force }

@@ -12,6 +12,9 @@
   ./hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Teardown -Apply
   ./hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Verify
   ./hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Sweep -Repo C:\repo
+  # -Sweep -Strict：连 [?]（可能是用户本来就有的东西）也判失败，逼你逐项确认
+  # 扫描末尾会打一行 ASCII 计数 HARD=/CHECK=/UNCOVERED=，给上层程序读；
+  # UNCOVERED 那几类（daemon/crontab/用户级环境变量/端口/跨仓）本工具判不了，必须另核
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Ledger,
@@ -26,6 +29,7 @@ param(
     [switch]$Apply,
     [switch]$Verify,
     [switch]$Sweep,
+    [switch]$Strict,
     [string]$Repo
 )
 
@@ -132,7 +136,8 @@ if ($Teardown) {
 if ($Verify) {
     $l = Load-Ledger $Ledger
     $bad = 0
-    Write-Host "[verify] 台账 $(@($l.hooks).Count) 条"
+    $tot = @($l.hooks).Count
+    Write-Host "[verify] 台账 $tot 条"
     foreach ($h in @($l.hooks)) {
         if ($h.action -eq 'created') {
             if (Test-Path -LiteralPath $h.path) { Write-Host ("  [X 残留] " + $h.path); $bad++ }
@@ -147,7 +152,8 @@ if ($Verify) {
             }
         }
     }
-    if ($bad -gt 0) { Write-Host "[verify] 失败：$bad 项未清干净。"; exit 1 }
+    if ($bad -gt 0) { Write-Host ("[verify] BAD=$bad OK=" + ($tot - $bad)); Write-Host "[verify] 失败：$bad 项未清干净。"; exit 1 }
+    Write-Host ("[verify] BAD=0 OK=$tot")
     Write-Host "[verify] 全部通过。"
     exit 0
 }
@@ -155,10 +161,12 @@ if ($Verify) {
 # ---------- 通用扫描 ----------
 if ($Sweep) {
     if (-not $Repo) { throw "-Sweep 需要 -Repo" }
-    $fatal = 0
+    $fatal = 0; $ask = 0
     Write-Host "[sweep] 目标：$Repo"
+    $isGit = Test-Path -LiteralPath (Join-Path $Repo ".git")
 
-    $hooksDir = Join-Path $Repo ".git\hooks"
+    # ===== 硬残留 [X]：能确定判定的才算，返回非零 =====
+    $hooksDir = Join-Path (Join-Path $Repo ".git") "hooks"
     if (Test-Path -LiteralPath $hooksDir) {
         $real = @(Get-ChildItem -LiteralPath $hooksDir -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*.sample" })
         if ($real.Count -gt 0) {
@@ -168,31 +176,67 @@ if ($Sweep) {
         } else { Write-Host "  [OK] .git/hooks 干净" }
     }
 
-    foreach ($c in @(".mcp.json", "mcp.json", ".cursor\mcp.json", ".vscode\mcp.json")) {
-        $p = Join-Path $Repo $c
-        if (Test-Path -LiteralPath $p) { Write-Host ("  [?] 存在 $c —— 确认里面的 server 注册是你主动要留的，否则删除"); }
+    if ($isGit) {
+        # 门被改指到仓外：只看 .git/hooks 会整个漏掉
+        $hp = (& git -C $Repo config --get core.hooksPath 2>$null | Out-String).Trim()
+        if ($hp) { Write-Host ("  [X] core.hooksPath = $hp（门藏在仓外，须 git config --unset 并恢复原目录）"); $fatal++ }
+        else { Write-Host "  [OK] core.hooksPath 未设" }
+
+        # 临时 worktree：§4.1 明列的残留物，git 自己能数
+        $wt = @((& git -C $Repo worktree list 2>$null | Where-Object { $_ -and $_.Trim() -ne '' }))
+        if ($wt.Count -gt 1) {
+            Write-Host ("  [X] worktree 共 $($wt.Count) 个，本流程临时建的须 git worktree remove：")
+            foreach ($w in ($wt | Select-Object -Skip 1)) { Write-Host ("        " + $w) }
+            $fatal++
+        } else { Write-Host "  [OK] worktree 只有主工作树" }
+
+        # 全局 git 配置里被加进来的 alias/pager/editor 之类
+        $ga = @(& git config --global --get-regexp 'alias\.|core\.(pager|editor)' 2>$null | Where-Object { $_ -and $_.Trim() -ne '' })
+        if ($ga.Count -gt 0) { Write-Host ("  [?] 全局 git 配置有 $($ga.Count) 项别名/pager/editor —— 确认不是本流程加的"); $ask++ }
     }
 
-    foreach ($c in @("AGENTS.md", "CLAUDE.md", ".cursorrules")) {
-        $p = Join-Path $Repo $c
-        if (Test-Path -LiteralPath $p) { Write-Host ("  [?] 存在 $c —— 确认没有本流程自动追加的段落") }
+    # ===== 需人工确认 [?]：可能是用户本来就有的东西 =====
+    foreach ($c in @(".mcp.json", "mcp.json", ".cursor\mcp.json", ".vscode\mcp.json")) {
+        if (Test-Path -LiteralPath (Join-Path $Repo $c)) { Write-Host ("  [?] 存在 $c —— 确认里面的 server 注册是你主动要留的，否则删除"); $ask++ }
     }
+    foreach ($c in @("AGENTS.md", "CLAUDE.md", ".cursorrules")) {
+        if (Test-Path -LiteralPath (Join-Path $Repo $c)) { Write-Host ("  [?] 存在 $c —— 确认没有本流程自动追加的段落"); $ask++ }
+    }
+    # CI 门（§4.1 列了，之前一版根本没查）
+    $ciFound = @()
+    foreach ($c in @(".github\workflows", ".github\actions", ".gitlab-ci.yml", "azure-pipelines.yml", ".circleci\config.yml", ".travis.yml", "Jenkinsfile", ".woodpecker.yml")) {
+        if (Test-Path -LiteralPath (Join-Path $Repo $c)) { $ciFound += $c }
+    }
+    if ($ciFound.Count -gt 0) { Write-Host ("  [?] 存在 CI 配置 " + ($ciFound -join ', ') + " —— 确认不是本流程装的门（台账里没登记就该删）"); $ask++ }
+
+    # 环境变量文件（§4.1 列了环境变量）
+    $envFound = @()
+    foreach ($c in @(".env", ".env.local", ".envrc")) { if (Test-Path -LiteralPath (Join-Path $Repo $c)) { $envFound += $c } }
+    if ($envFound.Count -gt 0) { Write-Host ("  [?] 存在环境变量文件 " + ($envFound -join ', ') + " —— 确认不是本流程写的（含令牌则必须删）"); $ask++ }
 
     foreach ($d in @(".codebase-memory", ".serena", ".repomap", ".cache\recon")) {
-        $p = Join-Path $Repo $d
-        if (Test-Path -LiteralPath $p) { Write-Host ("  [?] 存在常驻索引目录 $d —— 若由本流程创建，必须删除") }
+        if (Test-Path -LiteralPath (Join-Path $Repo $d)) { Write-Host ("  [?] 存在常驻索引目录 $d —— 若由本流程创建，必须删除"); $ask++ }
     }
 
-    if (Test-Path -LiteralPath (Join-Path $Repo ".git")) {
-        $st = @(git -c core.quotepath=false -C $Repo status --porcelain 2>$null)
-        Write-Host ("  [?] git status 有 $($st.Count) 项变更 —— 逐项确认是否都是用户要的成果物：")
-        foreach ($s in ($st | Select-Object -First 30)) { Write-Host ("        " + $s) }
+    if ($isGit) {
+        $st = @(git -c core.quotepath=false -C $Repo status --porcelain 2>$null | Where-Object { $_ -and $_.Trim() -ne '' })
+        if ($st.Count -gt 0) {
+            Write-Host ("  [?] git status 有 $($st.Count) 项变更 —— 逐项确认是否都是用户要的成果物：")
+            foreach ($s in ($st | Select-Object -First 30)) { Write-Host ("        " + $s) }
+            $ask++
+        } else { Write-Host "  [OK] git status 干净" }
     }
 
-    if ($fatal -gt 0) { Write-Host "[sweep] 发现 $fatal 类硬残留。"; exit 1 }
-    Write-Host "[sweep] 无硬残留（[?] 项需人工确认）。"
+    # ===== 判不了的，明说；不许让它长得像"扫过了" =====
+    $unc = @('daemon / watcher', 'crontab 与计划任务', '用户级环境变量与 shell profile', '常驻端口与后台任务', '跨仓写入（只扫了 -Repo 这一个目录）')
+    Write-Host ("  [未覆盖] " + ($unc -join ' / '))
+
+    Write-Host ("[sweep] HARD=$fatal CHECK=$ask UNCOVERED=" + $unc.Count)
+    if ($fatal -gt 0) { Write-Host "[sweep] 发现 $fatal 类硬残留，必须清掉才算收尾。"; exit 1 }
+    if ($Strict -and ($ask -gt 0)) { Write-Host "[sweep] -Strict：$ask 项 [?] 未逐一确认，判失败。"; exit 1 }
+    Write-Host "[sweep] 无硬残留（[?] $ask 项需人工确认，未覆盖 " + $unc.Count + " 类需另行核）。"
     exit 0
 }
 
-Write-Host "用法：-Register / -List / -Teardown [-Apply] / -Verify / -Sweep -Repo <路径>"
+Write-Host "用法：-Register / -List / -Teardown [-Apply] / -Verify / -Sweep [-Strict] -Repo <路径>"
 exit 2

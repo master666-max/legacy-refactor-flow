@@ -45,6 +45,9 @@ A~D 是纯投入期，**一行业务代码都不改**。跳过 D 直接进 E，�
 ./scripts/hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Teardown -Apply
 ./scripts/hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Verify
 ./scripts/hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Sweep -Repo <目标仓库>
+
+# 4b) 可选：连 [?]（可能本来就是用户有的）也判失败，逼自己逐项确认完
+./scripts/hooks-ledger.ps1 -Ledger _refactor-kit/hooks.json -Sweep -Strict -Repo <目标仓库>
 ```
 
 ## 安装
@@ -70,7 +73,7 @@ git clone https://github.com/master666-max/legacy-refactor-flow.git "$HOME/.dsh/
 | `scripts/phase0-recon.ps1` | 侦察调度器：优先调 scc/tokei/cloc/code-maat/jscpd，内置实现仅兜底并标注来源 |
 | `references/REFACTOR-RUNBOOK.md` | 完整作战手册：阶段细节、出口条件、按语言工具矩阵、提示词模板 |
 | `references/COMMUNITY-MAP.md` | 社区已有方法与流程图、现成工具地图、与 aim42 的对应关系 |
-| `references/EXAMPLE-recon-report.md` | 侦察脚本的真实输出样例 |
+| `references/EXAMPLE-recon-report.md` | 侦察报告的真实输出样例两份：外部工具在位 / 全缺走兜底 |
 | `tests/run-all.ps1` | 一次跑完三个自检，任一非零即整体非零 |
 | `tests/check-encoding.ps1` | 编码不变量：每个 `.ps1` 恰好一个 BOM、自带码页守卫；含**哨兵** |
 | `tests/check-ledger-lifecycle.ps1` | 台账工具 14 步全生命周期，含"没拆必须拦"的反向用例 |
@@ -118,6 +121,19 @@ pwsh -NoProfile -File tests/run-all.ps1           # 也可以；但在 Windows �
 `.gitattributes` 里的 `*.ps1 text eol=crlf` **只管换行符，不管编码**，管不住第一行那条。
 
 ## 变更记录
+
+### v1.2（2026-09-28）—— 工具追上自家铁律
+
+| 变更 | 说明 |
+|---|---|
+| `-Sweep` 补三类盲区 | SKILL.md §4.1 列了 CI 配置 / 环境变量 / worktree，之前**一条都没查**。现补齐：CI 配置与 `.env*` 计入 `[?]`；`core.hooksPath` 被改指仓外、临时 worktree 多于一个，计入 `[X]` 硬残留并返回非零 |
+| 未覆盖项明写 | daemon / crontab / 用户级环境变量 / 常驻端口 / 跨仓写入 —— 本工具判不了，扫描末尾打 `[未覆盖] …`，**不许让它长得像"扫过了"** |
+| 机器可读汇总 | `-Sweep` 打 `HARD= CHECK= UNCOVERED=`，`-Verify` 打 `BAD= OK=`；中文给人看，ASCII 给上层读 |
+| `-Sweep -Strict` | 连 `[?]`（可能是用户本来就有的）也判失败，用于"必须逐项确认完"的收尾 |
+| 报告路径口径统一 | 第 2 节表头写"相对路径"、scc 分支却塞的是绝对 `Location`；现统一由 `Get-Rel` 削根，兜底与入口点候选同口径 |
+| 样例报告换靶 | `references/EXAMPLE-recon-report.md` 原先扫的是另一个项目，把它的绝对路径与文件名带进了公开仓；现改为本仓自扫，并附一份"无外部工具时走兜底"的形状 |
+
+自检同步扩到 **25 + 14 项**：新增 15~20（Sweep 覆盖面，用**增量**比对不猜绝对计数）与 R8/R8b（路径口径）。反向对照实测：喂 v1.1 的 `phase0` → R8/R8b 红（7 条路径全绝对）；喂 v1.1 的 `hooks-ledger` → 新 7 格全红、原有 18 项仍绿。
 
 ### v1.1（2026-09-28）—— 修 7 处，其中 6 处在 v1.0 上会让报告写错结论
 
