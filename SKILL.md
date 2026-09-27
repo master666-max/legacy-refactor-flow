@@ -3,7 +3,7 @@ name: legacy-refactor-flow
 description: 遗留系统/屎山重构的通用流程，自带强制拆除。当用户说「重构这个屎山」「这项目没人懂也没测试」「遗留代码怎么安全改造」「legacy 怎么现代化」，或面对一个只知大致用途、缺少测试、可能是 AI 生成的代码库需要安全改造时使用。流程：立界→测绘→定活→造裁判→小步改；全过程把创建的持久化钩子登记入台账，收尾时强制拆除并脚本验证，保证不留任何跨会话残留。
 ---
 
-# 遗留系统重构通用流程 v1.0
+# 遗留系统重构通用流程 v1.1
 
 ## 0. 两条铁律
 
@@ -105,6 +105,8 @@ Copy-Item <原文件> <备份路径> -Force
 | 确定性批量改造 | `ast-grep` / OpenRewrite / jscodeshift / libcst / Rector | — |
 
 `scripts/phase0-recon.ps1` 本身就是这些工具的**调度器**：优先调 scc/tokei/cloc/code-maat，内置实现仅兜底，并在报告里标注数据来源。
+
+改这两个脚本前先看 README「编码契约」：`.ps1` 必须存成**带 BOM 的 UTF-8**，且保留脚本开头的 `[Console]::OutputEncoding = UTF8`。少一条，脚本在「中文 Windows + PowerShell 5.1」这个默认组合上要么直接 ParserError 不可用，要么输出经管道给上层时中文整片乱码——而这套流程的收尾判定恰恰依赖读脚本输出。
 
 ### 5.1 社区已有的方法，不要重新发明
 

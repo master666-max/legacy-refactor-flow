@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   hooks-ledger.ps1 —— 持续性钩子台账：登记 / 列表 / 预演 / 拆除 / 验证 / 通用扫描
 .DESCRIPTION
@@ -30,6 +30,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# 中文输出按 UTF-8 编码：PS 5.1 默认按控制台 OEM 代码页输出，经管道/重定向给上层读时整片乱码
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 function Load-Ledger {
     param([string]$p)

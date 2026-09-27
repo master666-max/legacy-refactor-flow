@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   phase0-recon.ps1 v2 —— 屎山重构侦察调度器（对应 aim42 · Analyze 阶段）
 .DESCRIPTION
@@ -16,10 +16,16 @@ param(
     [Parameter(Mandatory = $true)][string]$RepoPath,
     [string]$OutFile = "recon-report.md",
     [int]$TopN = 20,
-    [switch]$WithDup
+    [switch]$WithDup,
+    # 噪声目录（逗号分隔目录名；含 `/` 的按路径段匹配，如 build/out）。
+    # 注意：默认表把 `build` 整个排除，对"build/ 是真代码"的仓库会漏统计——
+    # 这类仓库请显式传入自己的列表（例如 build/out 只排生成物）。
+    [string]$ExcludeDirs = "node_modules,.git,dist,build,target,vendor,out,bin,obj"
 )
 
 $ErrorActionPreference = "Stop"
+# 子进程（git 等）输出按 UTF-8 解码：PS 5.1 默认按控制台 OEM 代码页解，中文提交信息会整片乱码
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 if (-not (Test-Path -LiteralPath $RepoPath)) { throw "路径不存在: $RepoPath" }
 $root = (Resolve-Path -LiteralPath $RepoPath).Path
 $nl = [Environment]::NewLine
@@ -35,10 +41,11 @@ foreach ($n in $want) { $tools[$n] = [bool](Get-Command $n -ErrorAction Silently
 $missing = @($want | Where-Object { -not $tools[$_] -and $_ -ne 'git' })
 Write-Host ("[recon] 已装: " + (($want | Where-Object { $tools[$_] }) -join ', '))
 
-$noise = @('node_modules','.git','dist','build','target','vendor','__pycache__','.venv','venv','.next','.nuxt','out','bin','obj','.mypy_cache','.pytest_cache','.tox','htmlcov','.idea','.vscode','.dsh-reef','coverage','.gradle','.terraform')
+$noise = @('node_modules','.git','__pycache__','.venv','venv','.next','.nuxt','.mypy_cache','.pytest_cache','.tox','htmlcov','.idea','.vscode','.dsh-reef','coverage','.gradle','.terraform') + @($ExcludeDirs -split ',' | Where-Object { $_ -ne '' })
 $codeExt = @('.ts','.tsx','.js','.jsx','.mjs','.cjs','.py','.java','.kt','.kts','.go','.rs','.cs','.php','.rb','.c','.h','.cc','.cpp','.hpp','.swift','.scala','.sh','.ps1','.sql','.vue','.svelte','.lua','.dart','.ex','.exs')
 $testRe = '((^|[\\/_.-])(tests?|specs?)([\\/_.-]|$))|_test\.|\.test\.|\.spec\.'
-$noiseRe = "[\\/](" + (($noise | ForEach-Object { [regex]::Escape($_) }) -join '|') + ")[\\/]"
+# 含 `/` 的条目按路径段匹配（`/` 同时匹配两种分隔符），其余按单级目录名匹配
+$noiseRe = "[\\/](" + (($noise | ForEach-Object { ([regex]::Escape($_)) -replace '/', '[\\/]' }) -join '|') + ")[\\/]"
 
 $all = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch $noiseRe })
 $code = @($all | Where-Object { $codeExt -contains $_.Extension.ToLower() })
@@ -55,11 +62,13 @@ $totalLines = 0
 
 if ($tools['scc']) {
     try {
-        $raw = (& scc --format json --no-cocomo --exclude-dir node_modules,.git,dist,build,target,vendor,out,bin,obj "$root" 2>$null | Out-String)
+        # 两处必需：① --by-file —— 不加时 scc 的 JSON 里 Files 数组恒为空，体量表会整表空白；
+        #          ② 字段名是 Name 不是 Language —— 用 Language 会得到空语言名。
+        $raw = (& scc --format json --no-cocomo --by-file --exclude-dir $ExcludeDirs "$root" 2>$null | Out-String)
         $j = $raw | ConvertFrom-Json
         foreach ($e in $j) {
-            if ($e.Language -eq 'Total') { continue }
-            $langRows.Add([pscustomobject]@{ Name = $e.Language; Files = $e.Count; Lines = $e.Lines; Code = $e.Code; Cx = $e.Complexity })
+            if ($e.Name -eq 'Total') { continue }
+            $langRows.Add([pscustomobject]@{ Name = $e.Name; Files = $e.Count; Lines = $e.Lines; Code = $e.Code; Cx = $e.Complexity })
             $totalLines += [int]$e.Lines
             if ($e.Files) { foreach ($f in $e.Files) { $fileRows.Add([pscustomobject]@{ Rel = $f.Location; Lines = (([int]$f.Code) + ([int]$f.Comment) + ([int]$f.Blank)); Cx = $f.Complexity }) } }
         }
@@ -118,11 +127,18 @@ if (Test-Path -LiteralPath (Join-Path $root ".git")) {
     if ($tools['code-maat']) {
         try {
             $log = Join-Path ([System.IO.Path]::GetTempPath()) "recon-cm-input.log"
-            git -c core.quotepath=false -C $root log --pretty=format:"[%h] %an %ad %s" --date=short --numstat 2>$null | Set-Content -LiteralPath $log -Encoding UTF8
-            $csv = (& code-maat -l $log -c git2 -a revisions 2>$null | Out-String)
-            $lines = $csv -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^entity' }
-            $churn = @($lines | Select-Object -First $TopN | ForEach-Object { $p = $_ -split ','; [pscustomobject]@{ Count = $p[1]; Name = $p[0] } })
-            $churnSource = "code-maat"
+            # 日志写成「无 BOM」UTF-8：PS 5.1 的 Set-Content -Encoding UTF8 会加 BOM，部分解析器在首行报错
+            $raw = (git -c core.quotepath=false -C $root log --pretty=format:"[%h] %an %ad %s" --date=short --numstat 2>$null | Out-String)
+            [System.IO.File]::WriteAllText($log, $raw, (New-Object System.Text.UTF8Encoding($false)))
+            # 用 `-c git`：本版 standalone jar 的 git2 解析器对规范格式也报 Parse error，git 解析器接受同一份日志
+            $csv = (& code-maat -l $log -c git -a revisions 2>$null | Out-String)
+            $lines = @($csv -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^entity' })
+            # 只采信真像 CSV 的输出：否则 java 的报错文本会被当成数据写进报告（静默失败）
+            $ok = ($csv -match '(?m)^entity,') -and (@($lines | Where-Object { $_ -match ',\d+\s*$' }).Count -gt 0)
+            if ($ok) {
+                $churn = @($lines | Select-Object -First $TopN | ForEach-Object { $p = $_ -split ','; [pscustomobject]@{ Count = $p[1]; Name = $p[0] } })
+                $churnSource = "code-maat"
+            }
         } catch { $churnSource = "无" }
     }
     if ($churnSource -eq "无") {
@@ -155,11 +171,18 @@ if ($WithDup -and $tools['jscpd']) {
 # ---------- 4. 基础设施 / 入口点 / 目录 ----------
 $entries = @($code | Where-Object { $b = $_.BaseName.ToLower(); ($b -eq 'main' -or $b -eq 'index' -or $b -eq 'app' -or $b -eq 'server' -or $b -eq 'cli' -or $b -eq 'program' -or $b -eq 'manage' -or $b -eq 'bootstrap' -or $b -eq 'wsgi' -or $b -eq 'asgi' -or $b -eq 'start') })
 $infra = @()
-foreach ($m in @('package.json','pytest.ini','pyproject.toml','setup.cfg','tox.ini','Makefile','go.mod','Cargo.toml','pom.xml','build.gradle','composer.json','requirements.txt','Dockerfile','docker-compose.yml','.github','.gitlab-ci.yml','Jenkinsfile','conftest.py','tests','test')) {
+$infraNames = @('package.json','pytest.ini','pyproject.toml','setup.cfg','tox.ini','Makefile','go.mod','Cargo.toml','pom.xml','build.gradle','composer.json','requirements.txt','Dockerfile','docker-compose.yml','.github','.gitlab-ci.yml','Jenkinsfile','conftest.py','tests','test')
+foreach ($m in $infraNames) {
     if (Test-Path -LiteralPath (Join-Path $root $m)) { $infra += $m }
 }
+# 多子项目仓库（monorepo）的测试/构建配置通常在各子目录里：根目录没有≠从零开始，再扫一级
+foreach ($d in (Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $noise -notcontains $_.Name })) {
+    foreach ($m in @('pytest.ini','pyproject.toml','setup.cfg','conftest.py','tests','test','package.json','Makefile','requirements.txt','tox.ini')) {
+        if (Test-Path -LiteralPath (Join-Path $d.FullName $m)) { $infra += ($d.Name + "/" + $m) }
+    }
+}
 $topDirs = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch $noiseRe } |
+    Where-Object { $noise -notcontains $_.Name } |
     ForEach-Object { $c = @(Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue).Count; [pscustomobject]@{ Name = $_.Name; Files = $c } } |
     Sort-Object Files -Descending | Select-Object -First 15)
 
