@@ -15,6 +15,12 @@
   # -Sweep -Strict：连 [?]（可能是用户本来就有的东西）也判失败，逼你逐项确认
   # 扫描末尾会打一行 ASCII 计数 HARD=/CHECK=/UNCOVERED=，给上层程序读；
   # UNCOVERED 那几类（daemon/crontab/用户级环境变量/端口/跨仓）本工具判不了，必须另核
+  #
+  # 租约：登记时给 -TTLHours，条目就带 owner/expires；发起方半路死了也有人来收
+  ./hooks-ledger.ps1 -Ledger ... -Register -Path C:\repo\.mcp.json -Action modified -Backup b.json -Owner sess-42 -TTLHours 6
+  ./hooks-ledger.ps1 -Ledger ... -Renew -Owner sess-42 -TTLHours 6        # 干完之前续命
+  ./hooks-ledger.ps1 -Ledger ... -Collect                                 # 干跑：列出过期未拆的孤儿
+  ./hooks-ledger.ps1 -Ledger ... -Collect -Apply                          # 真拆；缺备份的一律不动
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Ledger,
@@ -24,12 +30,18 @@ param(
     [ValidateSet('created','modified','appended')][string]$Action = 'created',
     [string]$Backup,
     [string]$Note = "",
+    # 租约：登记时给一个存活小时数，条目就带上到期时间；0 = 不过期（与旧版行为一致）
+    [string]$Owner = "",
+    [double]$TTLHours = 0,
     [switch]$List,
     [switch]$Teardown,
     [switch]$Apply,
     [switch]$Verify,
     [switch]$Sweep,
     [switch]$Strict,
+    # 收集器：把租约已过期、但发起方没回来拆的条目当孤儿处理（默认只报不删）
+    [switch]$Collect,
+    [switch]$Renew,
     [string]$Repo
 )
 
@@ -66,6 +78,40 @@ function Get-Hash {
     return (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
 }
 
+# 租约判定：没有 expires 字段（或为空）的条目**永不算过期** —— 收集器绝不碰它，
+# 因为"没登记到期时间"不等于"已到期"，误删比漏删严重。
+function Test-Expired {
+    param($h)
+    if (-not $h.expires) { return $false }
+    try {
+        $e = [DateTime]::Parse([string]$h.expires, [System.Globalization.CultureInfo]::InvariantCulture)
+        return ($e -lt (Get-Date))
+    } catch { return $false }
+}
+
+# 拆除单条：Teardown 与 Collect 共用同一具身体，避免两套逻辑走偏
+function Invoke-RemoveOne {
+    param($h, [bool]$apply)
+    if ($h.action -eq 'created') {
+        if (Test-Path -LiteralPath $h.path) {
+            Write-Host ("  [删除] " + $h.path)
+            if ($apply) { Remove-Item -LiteralPath $h.path -Recurse -Force; $h.removed = $true }
+        } else {
+            Write-Host ("  [跳过] 已不存在：" + $h.path)
+            if ($apply) { $h.removed = $true }
+        }
+    } else {
+        if (-not $h.backup -or -not (Test-Path -LiteralPath $h.backup)) {
+            Write-Warning ("  [无法恢复] 缺备份：" + $h.path)
+            return 'blocked'
+        } else {
+            Write-Host ("  [恢复] " + $h.path + "  <=  " + $h.backup)
+            if ($apply) { Copy-Item -LiteralPath $h.backup -Destination $h.path -Force; $h.removed = $true }
+        }
+    }
+    return 'done'
+}
+
 # ---------- 登记 ----------
 if ($Register) {
     if (-not $Path) { throw "登记需要 -Path" }
@@ -73,6 +119,9 @@ if ($Register) {
     $full = [System.IO.Path]::GetFullPath($Path)
     $b = ""
     if ($Backup) { $b = [System.IO.Path]::GetFullPath($Backup) }
+    if (-not $Owner) { $Owner = "$env:USERNAME" }
+    $exp = ""
+    if ($TTLHours -gt 0) { $exp = (Get-Date).AddHours($TTLHours).ToString('s') }
     $l = Load-Ledger $Ledger
     $entry = [pscustomobject]@{
         ts           = (Get-Date -Format 's')
@@ -82,12 +131,33 @@ if ($Register) {
         backup       = $b
         originalHash = (Get-Hash $b)
         note         = $Note
+        owner        = $Owner
+        expires      = $exp
         removed      = $false
     }
     $l.hooks = @($l.hooks) + $entry
     Save-Ledger $l $Ledger
     Write-Host "[ledger] 已登记：$Action / $Kind / $full"
     if ($b) { Write-Host "[ledger] 备份：$b" }
+    if ($exp) { Write-Host "[ledger] 租约：owner=$Owner 到期=$exp（过期后由 -Collect 接管，不必等发起方回来）" }
+    else { Write-Host "[ledger] 租约：owner=$Owner 未设 TTL —— 收集器不会碰这条，拆除责任在发起方" }
+    exit 0
+}
+
+# ---------- 续租 ----------
+if ($Renew) {
+    $l = Load-Ledger $Ledger
+    $n = 0
+    foreach ($h in @($l.hooks)) {
+        if ($h.removed) { continue }
+        if ($Path -and ([System.IO.Path]::GetFullPath($Path) -ne $h.path)) { continue }
+        if (-not $Path -and $Owner -and $h.owner -ne $Owner) { continue }
+        if (-not $h.expires) { continue }
+        $h.expires = (Get-Date).AddHours($TTLHours).ToString('s'); $n++
+        Write-Host ("  [续租] " + $h.path + " -> " + $h.expires)
+    }
+    if ($n -eq 0) { Write-Host "[renew] 没有可续的条目（只续带租约且未拆的；TTLHours 需 > 0）" }
+    else { Save-Ledger $l $Ledger; Write-Host "[renew] RENEWED=$n" }
     exit 0
 }
 
@@ -99,7 +169,9 @@ if ($List) {
     foreach ($h in $l.hooks) {
         $state = "待拆"
         if ($h.removed) { $state = "已拆" }
-        Write-Host ("  [{0}] {1,-8} {2,-10} {3}" -f $state, $h.action, $h.kind, $h.path)
+        elseif (Test-Expired $h) { $state = "过期" }
+        $lease = if ($h.expires) { " 到期 " + $h.expires + " owner " + $h.owner } else { " 无租约" }
+        Write-Host ("  [{0}] {1,-8} {2,-10} {3}{4}" -f $state, $h.action, $h.kind, $h.path, $lease)
     }
     exit 0
 }
@@ -110,25 +182,39 @@ if ($Teardown) {
     $pending = @($l.hooks | Where-Object { -not $_.removed })
     if ($pending.Count -eq 0) { Write-Host "[teardown] 台账为空或已全部拆除。"; exit 0 }
     if ($Apply) { Write-Host "[teardown] 执行拆除，共 $($pending.Count) 项" } else { Write-Host "[teardown] 预演模式（不改动任何东西），共 $($pending.Count) 项。加 -Apply 执行。" }
-    foreach ($h in $pending) {
-        if ($h.action -eq 'created') {
-            if (Test-Path -LiteralPath $h.path) {
-                Write-Host ("  [删除] " + $h.path)
-                if ($Apply) { Remove-Item -LiteralPath $h.path -Recurse -Force; $h.removed = $true }
-            } else {
-                Write-Host ("  [跳过] 已不存在：" + $h.path)
-                if ($Apply) { $h.removed = $true }
-            }
-        } else {
-            if (-not $h.backup -or -not (Test-Path -LiteralPath $h.backup)) {
-                Write-Warning ("  [无法恢复] 缺备份：" + $h.path)
-            } else {
-                Write-Host ("  [恢复] " + $h.path + "  <=  " + $h.backup)
-                if ($Apply) { Copy-Item -LiteralPath $h.backup -Destination $h.path -Force; $h.removed = $true }
-            }
-        }
-    }
+    $blocked = 0
+    # 注意：[bool]$Apply 必须先在**表达式模式**下算好再传；写成 Invoke-RemoveOne $h [bool]$Apply
+    # 时参数模式不当它是转型，会把字符串塞给 [bool] 形参而绑参失败（实测踩过）。
+    $doApply = [bool]$Apply
+    foreach ($h in $pending) { if ((Invoke-RemoveOne -h $h -apply $doApply) -eq 'blocked') { $blocked++ } }
     if ($Apply) { Save-Ledger $l $Ledger; Write-Host "[teardown] 执行完毕。请运行 -Verify 验证。" }
+    Write-Host ("[teardown] PENDING=" + $pending.Count + " BLOCKED=" + $blocked + " APPLIED=" + [int][bool]$Apply)
+    if ($blocked -gt 0) { Write-Host "[teardown] $blocked 项缺备份、无法恢复 —— 判失败（别当拆过了）。"; exit 1 }
+    exit 0
+}
+
+# ---------- 孤儿收集器（不依赖发起方活着） ----------
+if ($Collect) {
+    $l = Load-Ledger $Ledger
+    $orphans = @($l.hooks | Where-Object { -not $_.removed -and (Test-Expired $_) })
+    if ($Owner -and $orphans.Count -gt 0) { $orphans = @($orphans | Where-Object { $_.owner -eq $Owner }) }
+    Write-Host ("[collect] 台账 " + @($l.hooks).Count + " 条，租约过期且未拆 " + $orphans.Count + " 条")
+    if ($orphans.Count -eq 0) {
+        Write-Host "[collect] ORPHAN=0 REMOVED=0"
+        Write-Host "[collect] 无孤儿。（无租约条目一律不算孤儿 —— 那是发起方的责任，收集器不猜）"
+        exit 0
+    }
+    if ($Apply) { Write-Host "[collect] 执行拆除，共 $($orphans.Count) 项" }
+    else { Write-Host "[collect] 干跑模式（不改动任何东西）。确认无误再加 -Apply。" }
+    $gone = 0; $blocked = 0
+    $doApply = [bool]$Apply
+    foreach ($h in $orphans) {
+        Write-Host ("  [孤儿] " + $h.path + "  owner=" + $h.owner + " 到期=" + $h.expires)
+        if ((Invoke-RemoveOne -h $h -apply $doApply) -eq 'blocked') { $blocked++ } else { $gone++ }
+    }
+    if ($Apply) { Save-Ledger $l $Ledger }
+    Write-Host ("[collect] ORPHAN=" + $orphans.Count + " HANDLED=$gone BLOCKED=" + $blocked + " APPLIED=" + [int][bool]$Apply)
+    if ($blocked -gt 0) { Write-Host "[collect] $blocked 项缺备份，收集器不动它（宁可留残留也不误删）。"; exit 1 }
     exit 0
 }
 
@@ -137,6 +223,7 @@ if ($Verify) {
     $l = Load-Ledger $Ledger
     $bad = 0
     $tot = @($l.hooks).Count
+    $expired = @(@($l.hooks) | Where-Object { -not $_.removed -and (Test-Expired $_) }).Count
     Write-Host "[verify] 台账 $tot 条"
     foreach ($h in @($l.hooks)) {
         if ($h.action -eq 'created') {
@@ -152,8 +239,9 @@ if ($Verify) {
             }
         }
     }
-    if ($bad -gt 0) { Write-Host ("[verify] BAD=$bad OK=" + ($tot - $bad)); Write-Host "[verify] 失败：$bad 项未清干净。"; exit 1 }
-    Write-Host ("[verify] BAD=0 OK=$tot")
+    if ($bad -gt 0) { Write-Host ("[verify] BAD=$bad OK=" + ($tot - $bad) + " EXPIRED=$expired"); Write-Host "[verify] 失败：$bad 项未清干净。"; exit 1 }
+    Write-Host ("[verify] BAD=0 OK=$tot EXPIRED=$expired")
+    if ($expired -gt 0) { Write-Host "[verify] 全绿，但有 $expired 条租约已过期未拆 —— 交给 -Collect 收尾，别等发起方。"; exit 0 }
     Write-Host "[verify] 全部通过。"
     exit 0
 }
@@ -238,5 +326,5 @@ if ($Sweep) {
     exit 0
 }
 
-Write-Host "用法：-Register / -List / -Teardown [-Apply] / -Verify / -Sweep [-Strict] -Repo <路径>"
+Write-Host "用法：-Register [-Owner x -TTLHours n] / -List / -Teardown [-Apply] / -Verify / -Sweep [-Strict] -Repo <路径> / -Renew / -Collect [-Apply]"
 exit 2

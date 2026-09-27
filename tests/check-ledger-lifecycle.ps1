@@ -103,6 +103,60 @@ try {
     Step 0  "13 Sweep 清门后应绿"     @('-Ledger', $ledger, '-Sweep','-Repo',$repo) | Out-Null
     Step 2  "14 无子命令给用法"        @('-Ledger', $ledger) | Out-Null
 
+    # ===== 21~27：租约与孤儿收集器（"发起方死了也要有人收"这条不变量）=====
+    $lz = Join-Path $kit "lease.json"
+    $lDir = Join-Path $kit "lease-dir"
+    $lNoTtl = Join-Path $kit "no-ttl-dir"
+    New-Item -ItemType Directory -Force -Path $lDir, $lNoTtl | Out-Null
+    Step 0 "21 Register 带 TTL 2h" @('-Ledger', $lz, '-Register','-Kind','dir','-Path',$lDir,'-Action','created','-Owner','t-lease','-TTLHours','2') | Out-Null
+    Step 0 "22 Register 不带 TTL"   @('-Ledger', $lz, '-Register','-Kind','dir','-Path',$lNoTtl,'-Action','created','-Owner','t-nottl') | Out-Null
+    # 被测件不认租约参数时（如 v1.1），Register 会失败、台账根本不会落盘。
+    # 这时候必须**整块判失败并继续**，不能让后面的读文件把 harness 崩掉——崩了会掩盖剩余检查。
+    if (-not (Test-Path -LiteralPath $lz)) {
+        Write-Host "  [X] 租约登记没落盘（被测件不认 -TTLHours/-Owner？）—— 21~27 整块计失败，继续跑收尾项"
+        $bad += 6
+    } else {
+    $lj = Get-Content -LiteralPath $lz -Raw -Encoding UTF8 | ConvertFrom-Json
+    $withExp = @($lj.hooks | Where-Object { $_.expires })
+    $noExp = @($lj.hooks | Where-Object { -not $_.expires })
+    if ($withExp.Count -eq 1 -and $noExp.Count -eq 1) { Write-Host "  [OK] 租约字段按预期落盘（1 条带 expires、1 条不带）"; $pass++ }
+    else { Write-Host "  [X] 租约字段没写对（带 expires $($withExp.Count) / 不带 $($noExp.Count)，应为 1/1）"; $bad++ }
+
+    $o = Step 0 "23 未过期 Collect" @('-Ledger', $lz, '-Collect')
+    if ($o -match 'ORPHAN=0' -and (Test-Path -LiteralPath $lDir)) { Write-Host "  [OK] 未过期不算孤儿，目录还在"; $pass++ }
+    else { Write-Host "  [X] 未过期就被当孤儿了"; $bad++ }
+
+    # 造过期：把带租约那两条的 expires 挪到一小时前（测过期不能靠真等）
+    $past = (Get-Date).AddHours(-1).ToString('s')
+    $lj = Get-Content -LiteralPath $lz -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($h in @($lj.hooks)) { if ($h.owner -eq 't-lease') { $h.expires = $past } }
+    ($lj | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $lz -Encoding UTF8
+
+    $o = Step 0 "24 过期 Collect 干跑" @('-Ledger', $lz, '-Collect')
+    if ($o -match 'ORPHAN=1' -and $o -match 'APPLIED=0' -and (Test-Path -LiteralPath $lDir)) {
+        Write-Host "  [OK] 干跑只报不删（ORPHAN=1 APPLIED=0，目录仍在）"; $pass++ }
+    else { Write-Host "  [X] 干跑改动了东西或没认出租户（输出见上）"; $bad++ }
+    $o = Step 1 "25 过期条目 Verify" @('-Ledger', $lz, '-Verify')
+    if ($o -match 'EXPIRED=1') { Write-Host "  [OK] Verify 把过期未拆计入 EXPIRED="; $pass++ }
+    else { Write-Host "  [X] Verify 没报出过期条目"; $bad++ }
+
+    $o = Step 0 "26 -Renew 续租" @('-Ledger', $lz, '-Renew','-Owner','t-lease','-TTLHours','5')
+    $o = Step 0 "26b 续租后 Collect" @('-Ledger', $lz, '-Collect')
+    if ($o -match 'ORPHAN=0' -and (Test-Path -LiteralPath $lDir)) { Write-Host "  [OK] 续租后不再是孤儿"; $pass++ }
+    else { Write-Host "  [X] 续租没起作用"; $bad++ }
+
+    # 再让它过期，然后 -Apply 真拆
+    $lj = Get-Content -LiteralPath $lz -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($h in @($lj.hooks)) { if ($h.owner -eq 't-lease') { $h.expires = $past } }
+    ($lj | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $lz -Encoding UTF8
+    Step 0 "27 Collect -Apply" @('-Ledger', $lz, '-Collect','-Apply') | Out-Null
+    if (-not (Test-Path -LiteralPath $lDir)) { Write-Host "  [OK] 过期孤儿被真删"; $pass++ }
+    else { Write-Host "  [X] -Apply 跑完目录还在，收集器没落地"; $bad++ }
+    # ★ 一票否决项：没设租约的条目，无论别人怎么过期都不许被碰
+    if (Test-Path -LiteralPath $lNoTtl) { Write-Host "  [OK] 无租约条目未被收集（误删一票否决项通过）"; $pass++ }
+    else { Write-Host "  [X] 无租约条目被收集器删了 —— 这是不可接受的误删"; $bad++ }
+    }   # ← 租约块（Test-Path $lz）的 else 收尾
+
     # ===== 15~20：-Sweep 覆盖面（SKILL.md §4.1 列的 CI / 环境变量 / worktree / hooksPath）=====
     # 计数一律看**增量**：沙箱里本来就挂着 .mcp.json 等 [?] 项，猜绝对值必错。
     function Sweep($extra) {
