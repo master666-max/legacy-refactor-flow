@@ -9,16 +9,30 @@
 //   所以本文件的每个阶段都是"派一个子 agent 去跑执行器的那一段，并把 rc 与失败门的证据带回来"。
 //   这样做的代价：门判强度没有因为这层壳而变高；好处是用户能一句话点单，并在运行前看到计划再放行。
 //
-// 未验证声明：本机 `qodercli status` = Not logged in，作者环境无法非交互登录，
-//   所以本文件**没有跑通过**。语法照文档写，agent()/phase()/args 的精确签名以
-//   `qodercli` 实际加载结果为准；第一次登录后必须先做"阶段数对不对、人工门能不能拦住"两条验证。
+// 未验证声明（2026-09-28 更新，剩最后一格）：本文件**没有被真正执行过**——名字能被解析到，
+//   但"运行工作流"这道授权只能由在场的人点允许，非交互通路给不出（下面四条实测）。
+//   语法照 CLI 自带契约写：脚本须以 `export const meta = { name, description, phases }` 起头（纯字面量），
+//   正文用 agent()/parallel()/pipeline()/phase()/log()。★ 但**meta 前面有注释不影响解析**（实测过）。
 //
-// 装出来的实况（2026-09-28 实测，与文档有三处不符，别照文档指挥）：
-//   · 安装脚本装的是 qodercli 1.1.64，落点 ~/.qoder/bin/qodercli/，命令名是 qodercli 而文档写的是 qoder；
-//   · qodercli --help 的 Commands 面里**没有** workflows 子命令（只有 mcp / plugins / skills / hooks /
-//     agents / login / status / commit / security / wiki …）⇒ 工作流入口只在 TUI 里（文档称 /workflows）；
-//   · 二进制里能搜到字符串 "export const meta"（11 处）与 "workflows/"（11 处），
-//     但搜不到字面 ".qoder/workflows"（多半是运行时拼路径）⇒ "到底放哪个目录"这条**尚未被证实**。
+// 装出来的实况（2026-09-28 在 qodercli 1.1.64 上逐条实测，命令与回执都可复跑）：
+//   · 命令名是 qodercli（文档写 qoder）；装在 ~/.qoder/bin/qodercli/，**该目录在 PATH 上但 exe 在子目录里**
+//     ⇒ 直接敲 qodercli 不响。修法：往 PATH 上已有的可写目录放一个 qodercli.cmd 转发，不动注册表。
+//   · `qodercli --help` 的 Commands 面里**没有** workflows 子命令（97 行帮助，清掉开关后仍 97 行、仍无）
+//     ——但这不等于不支持：二进制里有 `commands.builtin.workflows.description`、`createWorkflowRegistryFromConfig`，
+//     且 Workflow 工具的入参说明写着 "Name of a predefined workflow from the built-in, plugin, project, or user workflow registry"。
+//   · 关掉它的是一把环境变量：**宿主 app 会注入 `QODER_FEATURE_WORKFLOWS_DISABLE=1`**（实测值就是 1）。
+//     所以"在 Qoder 里跑子进程 qodercli"必然看不见工作流；把这三个变量清掉再起，CLI 就承认
+//     "我持有名为 Workflow 的工具，另有 /workflows 内置命令（用于查看进度，不是触发入口）"。
+//   · 非交互 `-p` 必须配 `--input-format stream-json --output-format stream-json`，否则报
+//     `sdk_invalid_args: Agent SDK entrypoint env is set but required flags are missing`（因为宿主注入了
+//     `QODER_AGENT_SDK_ENTRYPOINT=sdk-ts`；清掉该变量后 `-p --output-format text` 可直接用）。
+//   · 触发实测（两个只差"meta 前有没有注释"的玩具工作流，同一权限档）：
+//     默认档 ⇒ 两个都回 `Error: Run workflow lrfpinga?` / `…lrfpingb?`（**弹窗文本带各自名字 ⇒ 名字解析成功**，卡在授权）；
+//     `--allowed-tools Workflow` ⇒ 仍拒（这道门不在工具白名单里）；
+//     `--permission-mode dont_ask` ⇒ `This action needs approval, and the "Don't ask" permission mode does not prompt`；
+//     `--permission-mode bypass_permissions` / `--dangerously-skip-permissions` **没试**：那等于把工作流里的
+//     每个子 agent 全免授权，代价与这条待验格不成比例。要真跑通请在 TUI 里点允许。
+//   ⇒ 结论：**平台支持动态工作流，但这层壳在本机仍是"未执行过"**；权威判据仍在 workflow-run.ps1。
 
 export const meta = {
   name: "legacy-refactor",

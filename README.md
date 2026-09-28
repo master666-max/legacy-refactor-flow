@@ -31,7 +31,7 @@ A 立界 → B 测绘 → C 定活 → D 造裁判 → E 小步改
 A~D 是纯投入期，**一行业务代码都不改**。跳过 D 直接进 E，等于在没有探测器的情况下改代码——
 下面提到的 39.4% 是**模型在基准上的成绩**，不是"跳过裁判会砸多少"的测量，只能当类比用。
 
-## 两种形态：按同一套流程，选一种强制力
+## 两种形态：按同一套流程，选一种强制力（另有一层未跑通的派工壳，见下）
 
 | | 技能形态（默认） | **工作流形态**（可选） |
 |---|---|---|
@@ -48,6 +48,13 @@ powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath D:\path\to\repo 
 # 事后核对密封 / 读某次 run
 powershell -NoProfile -File workflow/workflow-run.ps1 -VerifySeal -RunDir <产物目录>
 ```
+
+**还有第三种入口，但它没跑通到最后一步**：`workflow/qoder-cli/legacy-refactor.js` 是给"宿主平台自己会派多 agent"
+（Qoder 的动态工作流）准备的壳——一句话点单，六个阶段各派一个子 agent 去跑上面那个执行器的一段。
+它的定位是**派工不判门**，判据仍然全在 `workflow-run.ps1`。本机 `qodercli` 1.1.64 实测：工作流被宿主注入的
+`QODER_FEATURE_WORKFLOWS_DISABLE=1` 关着；清掉后 CLI 承认有 `Workflow` 工具、**且能按名字解析到**
+`.qoder/workflows/*.js`，但"运行工作流"要人在场点允许，非交互通路给不出。⇒ **这层壳一次都没真正执行过**，
+别当已交付能力用；逐条命令与回执写在该文件头。
 
 产物落在**被检仓之外**（`~/.legacy-refactor-flow/runs/<projectId>/<runId>/`），跑完目标仓 `git status` 仍干净。
 契约与限度见 `workflow/contract.md`（含"清单声明了但执行器暂未执行"那一节），接进平台的步骤见 `workflow/IMPORT.md`。
@@ -152,6 +159,21 @@ pwsh -NoProfile -File tests/run-all.ps1           # 也可以；但在 Windows �
 `.gitattributes` 里的 `*.ps1 text eol=crlf` **只管换行符，不管编码**，管不住第一行那条。
 
 ## 变更记录
+
+### v1.5.2（2026-09-28）—— 把"本平台到底支不支持复杂工作流"量成一条可复跑的事实
+
+上一版对 Qoder CLI 那层壳只留下一句"未跑通，因为未登录"。本轮把这格推到底，结论换了方向：
+
+| 先前写的 | 实测 |
+|---|---|
+| CLI 没有工作流入口（`--help` 面里没有 workflows 子命令） | 帮助面确实没有（清掉开关后仍 97 行），但**功能在**：二进制里有 `commands.builtin.workflows`、`createWorkflowRegistryFromConfig`，清掉开关后 CLI 自陈持有 `Workflow` 工具 |
+| 未跑通是因为没登录 | 真因是宿主 app 注入 `QODER_FEATURE_WORKFLOWS_DISABLE=1` 把它**关掉**；登录不是障碍 |
+| 放哪个目录尚未证实 | 已证实：项目 `.qoder/workflows/*.js` 里的名字能被解析（审批弹窗精确带出名字），`meta` 前有注释也不影响 |
+| 差一次真实执行 | 仍差。非交互通路放行不了这道授权（默认档回 `Run workflow <名字>?`；`--allowed-tools` 不覆盖它；`dont_ask` 直接拒）。**没有**改用 `bypass_permissions` 强跑通：那等于把这层壳里每个子 agent 全免授权，为补一格付整台的代价 |
+
+顺带修两处"文档比实现落后"：`qodercli` 装在 `~/.qoder/bin/qodercli/` 而 PATH 上只有父目录 ⇒ 命令敲不响，
+本轮用 PATH 内一个 `.cmd` 转发解决（没动注册表）；README/SKILL 此前**完全没提**这层壳的存在，
+现在写明了它的定位（派工不判门）和"未执行过一次"的限度。
 
 ### v1.5.1（2026-09-28）—— R1 的仪器入库，并顺手逮到 README 自己数错了
 

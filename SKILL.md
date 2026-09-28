@@ -191,7 +191,7 @@ D 步用 `scripts/mutation-probe.ps1` 量裁判强度——它往代码里注入
 
 详见 `references/COMMUNITY-MAP.md`；完整操作手册见 `references/REFACTOR-RUNBOOK.md`。
 
-## 6. 两种交付形态：技能（默认）与工作流（可选，供用户选）
+## 6. 交付形态：技能（默认）与工作流（可选，供用户选）；另有一层派工壳见 6.1
 
 同一套 A→B→C→D→E→拆除，两种强制力。用户说"用工作流跑""你们支持复杂工作流的那种"时才切第二种。
 
@@ -212,6 +212,20 @@ powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath <目标仓> -Tes
 **按退出码说话，措辞受限**：`0` 才可按 DoD 交付；`1` 必须贴出失败那条门的 `detail`（含输出尾部）；
 `3` 只能说"跑到哪、还差哪个人工确认"；`2` 是清单缺失/用法错，属安装故障，**不许绕过去手工模拟门**。
 `-Confirm` 里的字母**只能来自用户本人的放行**，不许自批，也不许把"我判断用户会同意"写成放行。
+
+### 6.1 第三种入口：宿主的动态工作流壳（本机未执行过一次，别当能力宣传）
+
+`workflow/qoder-cli/legacy-refactor.js` 放在项目的 `.qoder/workflows/` 下，让支持动态工作流的宿主按名字派工。
+它**只派工、不判门**：六个阶段各派一个子 agent 去跑上面那个执行器的一段并把 rc 与证据带回，22 道门一条也没有因为这层壳变强。
+
+本机 `qodercli` 1.1.64 实测（2026-09-28，命令与回执逐条记在该文件头）：
+
+- 工作流是被宿主注入的 `QODER_FEATURE_WORKFLOWS_DISABLE=1` **关着**的，不是"平台没有"。清掉后 CLI 自陈持有 `Workflow` 工具与 `/workflows` 命令。
+- `.qoder/workflows/*.js` 里的名字**能被解析到**（审批弹窗文本精确带出工作流名；`meta` 前面有注释也不影响）。
+- 卡在最后一步：运行工作流要**在场的人点允许**。非交互 `-p` 下默认档回 `Error: Run workflow <名字>?`，
+  `--allowed-tools Workflow` 不覆盖这道门，`--permission-mode dont_ask` 直接拒。作者**没有**用 `bypass_permissions`
+  强跑通——那等于把壳里每个子 agent 全免授权，代价远大于补这一格。
+- ⇒ 对用户只可以说"这层壳写好了、名字解析已验、执行未验"，**不许**说"支持一键跑复杂工作流"。
 
 产物一律落 `~/.legacy-refactor-flow/runs/…`（被检仓之外）。契约、限度、未实现字段的声明见 `workflow/contract.md`；
 接入平台的步骤见 `workflow/IMPORT.md`；斜杠命令入口在 `commands/`（full / gate / status）。
