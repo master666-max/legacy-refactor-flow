@@ -195,7 +195,7 @@ foreach ($ph in $mf.phases) {
     $started = $true
     Write-Host ""
     Write-Host ("══════ {0} {1} —— {2}" -f $ph.id, $ph.name, $ph.goal)
-    $phaseFail = ''; $dNote = ''
+    $phaseFail = ''; $dNote = ''; $stepFail = ''
     foreach ($st in @($ph.steps)) {
         if ($st.kind -eq 'manual') { Write-Host ("  [待办·人] " + (Sub $st.desc)); continue }
         if ($st.kind -eq 'cmd') {
@@ -203,6 +203,7 @@ foreach ($ph in $mf.phases) {
             Write-Host ("  [跑] " + (Sub $st.desc) + " → rc=" + $r.rc)
             $ev = Tail $r.out 6
             if ($r.rc -ne 0 -and $ev) { Write-Host ("        输出尾部: " + $ev) }
+            if ($r.rc -ne 0 -and -not $stepFail) { $stepFail = (Sub $st.desc) + "（rc=" + $r.rc + "）" }
             $gates.Add([pscustomobject]@{ phase = $ph.id; kind = 'step'; id = $st.desc; op = 'cmd'; target = Sub $st.cmd; verdict = $(if ($r.rc -eq 0) {'pass'} else {'fail'}); detail = $ev; rc = $r.rc; at = (Get-Date -Format 's') })
         } else {
             $argv = @($st.args | ForEach-Object { Sub $_ })
@@ -211,6 +212,7 @@ foreach ($ph in $mf.phases) {
             $ev = Tail $r.out 6
             if ($r.rc -ne 0 -and $ev) { Write-Host ("        输出尾部: " + $ev) }
             $gates.Add([pscustomobject]@{ phase = $ph.id; kind = 'step'; id = $st.tool; op = 'tool'; target = ($argv -join ' '); verdict = $(if ($r.rc -eq 0) {'pass'} else {'fail'}); detail = $ev; rc = $r.rc; at = (Get-Date -Format 's') })
+            if ($r.rc -ne 0 -and -not $stepFail) { $stepFail = $st.tool + "（rc=" + $r.rc + "）" }
         }
     }
     foreach ($g in @($ph.gates)) {
@@ -253,6 +255,12 @@ foreach ($ph in $mf.phases) {
             if ($verdict -eq 'wait') { $exitCode = 3 } else { $exitCode = 1 }
             break
         }
+    }
+    if (-not $DryRun -and -not $phaseFail -and $stepFail) {
+        # 门全过但步骤非零 ⇒ 不许报"全门通过"。实发形状：探针 rc=3（一个候选点都没采到）时整阶段长得像成功，
+        # 最后靠 D-g1"报告文件不存在"间接发现 —— 那是巧合，不是判据。
+        $phaseFail = "step:$stepFail"; $exitCode = 1
+        Write-Host ("  [阶段] 门没判失败，但步骤非零：$stepFail ⇒ 本阶段判不过")
     }
     if ($ph.id -eq 'D' -and -not $DryRun) {
         # 从强度报告里取机器读数：uncov>0 记 unknown（缺席不许当已解决），并把得分钉进 coverage

@@ -32,7 +32,7 @@
     "testCmd": { "required": true, "desc": "跑裁判的命令，例：py -3 -X utf8 check.py / node --test all.test.js / make test" },
     "profile": { "default": "full", "desc": "gate | full" },
     "kitDir": { "default": "_refactor-kit", "desc": "目标仓内的好产物目录（SCOPE/分诊表留在这里）" },
-    "mutationTargets": { "default": "src", "desc": "裁判强度探针的采样目标" },
+    "mutationTargets": { "default": ".", "desc": "裁判强度探针的采样目标。★ 默认整仓（`.`）而不是 `src`：写死 `src` 会在没有该目录的仓上量出 0 候选并假装跑完（2026-09-28 实发）。目标不存在现在会计入 missing-targets 并以 rc=3 失败" },
     "maxMutants": { "default": 30, "desc": "变异名额上限；未采到的量在 coverage 里记 unknown，不当 resolved" },
     "leaseTTLHours": { "default": 6, "desc": "钩子租约：过期后 -Collect 接管，不依赖发起方存活" },
     "owner": { "default": "workflow", "desc": "写进台账的 owner 标记" }

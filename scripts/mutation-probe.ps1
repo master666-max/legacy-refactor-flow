@@ -10,6 +10,9 @@
   安全线：全程在 %TEMP% 的副本里做，**一行业务代码都不会被真改**；跑完删副本。
   基线红就拒跑：测试本来就是红的，任何"变异被抓住"都是假信号。
 
+  退出码：0 = 量到了（哪怕得分很低）；2 = 基线红/超时，拒跑；3 = **一个候选点都没采到**
+  （目标不存在或指错地方）——报告仍会写，但这个 0 不是"裁判强"，不许上游当成功。
+
   为什么只内置兜底、不去驱动 Stryker/mutmut：那些工具要各自的语言配置与构建链，
   代跑半套比不跑更坏（配置错了会给出一个看似合理的得分）。装了它们请按报告末尾的命令自己跑，
   再把得分并进来。本探针给的是**下限证据**，不是充分性证明。
@@ -167,11 +170,18 @@ Write-Host "[mut] BASELINE=green"
 $allRows = New-Object System.Collections.Generic.List[object]
 $avail = [ordered]@{}
 $samp  = [ordered]@{}
+$missing = New-Object System.Collections.Generic.List[string]
 $scanCap = 5000
 $scanTrunc = $false
 foreach ($t in $Targets) {
     $tp = if ([System.IO.Path]::IsPathRooted($t)) { $t } else { Join-Path $work $t }
-    if (-not (Test-Path -LiteralPath $tp)) { continue }
+    if (-not (Test-Path -LiteralPath $tp)) {
+        # 目标不存在是**配置错**，不是"这仓没有可变异的地方"。静默跳过的后果：整轮量出 0 候选，
+        # 而 rc 照样 0、门照样过 —— 2026-09-28 在 dsh-launcher 上实发（清单默认目标 src 在该仓不存在）。
+        $missing.Add($t)
+        Write-Host ("[mut] ★ 目标不存在，已计入 targets_missing：$t")
+        continue
+    }
     $files = if ((Get-Item -LiteralPath $tp).PSIsContainer) {
         @(Get-ChildItem -LiteralPath $tp -Recurse -File -Force -ErrorAction SilentlyContinue |
             Where-Object { $exts -contains $_.Extension.ToLower() -and -not ($_.FullName -match $testRe) } |
@@ -216,10 +226,9 @@ if ($zeroFiles.Count -gt 0 -or $missedPts -gt 0) {
     foreach ($z in ($zeroFiles | Select-Object -First 12)) { Write-Host ("        未采到: " + $z + "（候选 " + $avail[$z] + " 个）") }
 }
 if ($mutants.Count -eq 0) {
-    Write-Host "[mut] MUT score=0 killed=0 total=0 probed=0 undecided=0 baseline=green source=builtin-textual"
-    Write-Host "[mut] 一个可变异点都没有 —— 目标选错了（-Targets 给的是不是测试目录？），这个 0 不代表裁判强。"
-    if (-not $KeepWork) { Remove-Item -LiteralPath $work -Recurse -Force }
-    exit 0
+    # 以前这里直接 exit 0 并且**不写报告**：0 候选被当成"跑完了"，下游的门只能靠"报告文件不存在"间接发现。
+    # 现在照常出报告（内容就是"没量到"），并在末尾按 rc=3 退出 —— 量不到东西不是成功。
+    Write-Host "[mut] 一个可变异点都没有 —— 目标选错了（-Targets 给的是不是测试目录/不存在的目录？），这个 0 不代表裁判强。"
 }
 
 # ---------- 4. 逐个注入 ----------
@@ -299,6 +308,18 @@ $L.Add("")
 if ($zeroFiles.Count -gt 0) {
     $L.Add("**有 $($zeroFiles.Count) 个文件一个点都没采到**（上表采到列为 0 的那些）⇒ 本得分不覆盖它们，别说成全仓得分。")
 }
+if ($totalAvail -eq 0) {
+    $L.Add("")
+    $L.Add("## 1c. 本轮**没有量到强度**（候选点 0）")
+    $L.Add("")
+    $L.Add("- 这不是""裁判强""，也不是""测试全绿所以安全""——这是**什么都没量到**。")
+    if ($missing.Count -gt 0) {
+        $L.Add("- 给的目标里有 $($missing.Count) 个在仓内不存在：``" + (($missing | ForEach-Object { $_ }) -join ' , ') + "``")
+        $L.Add("- 修法：把 `-Targets` 换成该仓真实存在的代码目录或文件；清单默认值是 ``.``（整仓），别照搬别处的 ``src``。")
+    } else {
+        $L.Add("- 目标存在但一个符合形状的可变异点都没有：多半 `-Targets` 指到了测试目录或非代码件。")
+    }
+}
 $L.Add("")
 $L.Add("## 2. 这个数不能说明什么")
 $L.Add("")
@@ -310,7 +331,7 @@ $L.Add("- **触达率未知**：变异点若落在根本没被任何测试执行
 $L.Add("- 装了 Stryker / mutmut / cargo-mutants / PIT 的，请按其原生配置再跑一遍并把得分并进来：")
 $L.Add("  ``npx stryker run`` ／ ``mutmut run`` + ``mutmut junitxml`` ／ ``cargo mutants``")
 $L.Add("")
-$machine = "[mut] MUT score=$score killed=$killed total=$evaluated probed=$($mutants.Count) avail=$totalAvail uncov=$missedPts zero-files=$($zeroFiles.Count) undecided=$undecided baseline=green source=builtin-textual"
+$machine = "[mut] MUT score=$score killed=$killed total=$evaluated probed=$($mutants.Count) avail=$totalAvail uncov=$missedPts zero-files=$($zeroFiles.Count) undecided=$undecided missing-targets=$($missing.Count) baseline=green source=builtin-textual"
 $L.Add("## 3. 机器读数")
 $L.Add("")
 $L.Add('```')
@@ -326,4 +347,7 @@ if ($OutFile) {
 if (-not $KeepWork) { Remove-Item -LiteralPath $work -Recurse -Force }
 Write-Host "[mut] 概要：得分 $score（抓住 $killed / 判了 $evaluated，漏放 $($survived.Count)，无法判定 $undecided，共探 $($mutants.Count)）"
 Write-Host $machine
+# rc=3 = 一个候选点都没采到（目标给错/不存在）：报告照写，但**不许当成功**。
+# 为什么不 exit 0：0 候选时的"绿"会被上游当"强度量过了"，实测就这么骗过了一道门。
+if ($totalAvail -eq 0) { Write-Host "[mut] 结论：本轮量不到强度（候选点 0）——按失败处理，别把 0 当安全。"; exit 3 }
 exit 0

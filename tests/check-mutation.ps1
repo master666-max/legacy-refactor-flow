@@ -40,18 +40,21 @@ function Skp($name, $why) { Write-Host ("  [SKIP] {0,-28} {1}" -f $name, $why); 
 
 $sh = if ($env:OS -eq 'Windows_NT') { 'powershell' } else { 'pwsh' }
 $shArgs = if ($env:OS -eq 'Windows_NT') { @('-NoProfile','-ExecutionPolicy','Bypass','-File') } else { @('-NoProfile','-File') }
-function Probe($repoArg, $testCmd, $targets, $maxM) {
+function Probe($repoArg, $testCmd, $targets, $maxM, $outF) {
     if (-not $maxM) { $maxM = 40 }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
-        $txt = & $sh ($shArgs + [string[]]@($Script, '-Repo', $repoArg, '-TestCmd', $testCmd, '-Targets', $targets, '-MaxMutants', "$maxM", '-TimeoutSec', '60')) 2>&1 | Out-String
+        $call = @($Script, '-Repo', $repoArg, '-TestCmd', $testCmd, '-Targets', $targets, '-MaxMutants', "$maxM", '-TimeoutSec', '60')
+        if ($outF) { $call = $call + @('-OutFile', $outF) }
+        $txt = & $sh ($shArgs + [string[]]$call) 2>&1 | Out-String
         $rc = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prev }
-    $o = [pscustomobject]@{ rc = $rc; score = -1.0; killed = -1; total = -1; avail = -1; uncov = -1; txt = $txt }
+    $o = [pscustomobject]@{ rc = $rc; score = -1.0; killed = -1; total = -1; avail = -1; uncov = -1; miss = -1; txt = $txt }
     if ($txt -match 'MUT score=([0-9.]+) killed=(\d+) total=(\d+)') {
         $o.score = [double]$matches[1]; $o.killed = [int]$matches[2]; $o.total = [int]$matches[3]
     }
     if ($txt -match 'avail=(\d+) uncov=(\d+)') { $o.avail = [int]$matches[1]; $o.uncov = [int]$matches[2] }
+    if ($txt -match 'missing-targets=(\d+)') { $o.miss = [int]$matches[1] }
     return $o
 }
 
@@ -130,6 +133,9 @@ test('故意红', () => { t.equal(1, 2); });
 
     $zero = Probe $repo "node --test strong/all.test.js" "src-empty"
     Chk 'M5 零变异点不许当好消息' ($zero.total -eq 0 -and $zero.txt -match '不代表裁判强') ("total=$($zero.total) rc=$($zero.rc)")
+    # M5b（2026-09-28 补）：上一版只断"报了警告"，**没断退出码** —— 于是探针量不到任何东西时
+    # 照样 exit 0，工作流那边靠"报告文件不存在"才间接发现。警告要配得上非零的 rc。
+    Chk 'M5b 量不到东西必须 rc=3' ($zero.rc -eq 3) "rc=$($zero.rc)（设计：0 候选 = 没量到，不是成功）"
 
     # M10：词法过滤的真覆盖。JS 注释旧版就跳，所以证明不了新逻辑；这里用 Python 夹具：
     #   装饰线 `==================` 含 9 个 `==`、docstring 那行含 `==` `>` `True` 3 个，
@@ -170,6 +176,19 @@ sys.exit(1 if bad else 0)
         Chk 'M10 非代码 token 不算候选点' ($p3.avail -eq 3) "avail=$($p3.avail)（真代码 3；不过滤会是 15）score=$($p3.score)"
         Chk 'M10b 全漏放的假低分不再出现' ($p3.score -eq 1) "得分 $($p3.score)（旧探针会把装饰线当漏放，压到 0.2）"
     }
+
+    # M11：目标**不存在**（清单默认值曾经写死 src，靶仓没有 src ⇒ 整轮量出 0 候选还 exit 0）。
+    #   要求：计入 missing-targets、rc=3、报告照样落盘并写明"没有量到强度"。三样缺一样就是假成功。
+    $mOut = Join-Path $sb "m11-report.md"
+    $mt = Probe $repo "node --test strong/all.test.js" "no-such-dir" 40 $mOut
+    $mTxt = if (Test-Path -LiteralPath $mOut) { [System.IO.File]::ReadAllText($mOut, [System.Text.Encoding]::UTF8) } else { '' }
+    Chk 'M11 目标不存在要计进 missing-targets' ($mt.miss -eq 1) "missing-targets=$($mt.miss) rc=$($mt.rc)"
+    Chk 'M11b 且 rc 非零' ($mt.rc -eq 3) "rc=$($mt.rc)（设计：3 = 一个候选点都没采到）"
+    Chk 'M11c 报告照样落盘并写明没量到' ((Test-Path -LiteralPath $mOut) -and ($mTxt -match '没有量到强度') -and ($mTxt -match 'no-such-dir')) "报告 $(if (Test-Path -LiteralPath $mOut) {'在'} else {'不在'})；缺目标名字写进正文=$($mTxt -match 'no-such-dir')"
+
+    # M12：整仓默认（清单默认值已从 src 改成 .）必须真采到东西。用 ≥ 下界，不猜绝对计数。
+    $dot = Probe $repo "node --test strong/all.test.js" "."
+    Chk 'M12 整仓目标能采到候选点' ($dot.avail -ge 9 -and $dot.rc -eq 0 -and $dot.miss -eq 0) "avail=$($dot.avail)（夹具真码 9 个变异点起）rc=$($dot.rc) missing=$($dot.miss)"
 
     # 工作副本用完必须删（探针自己清干净）。不用 -Filter：Windows 的 8.3 短名会让
     # "lrf-mut-*" 匹配到意料之外的东西；直接按名字正则取探针工作副本（时间戳开头是数字）。

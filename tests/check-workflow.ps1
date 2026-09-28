@@ -148,6 +148,44 @@ test('边界', () => { t.equal(c.adult(18), true); t.equal(c.adult(17), false); 
     $r8d = Run ($gbase + @('-DryRun'))
     Chk 'W8b dry-run 未确认仍不出 complete' ($r8d.rc -eq 3 -and $r8d.out -match 'planned') "rc=$($r8d.rc)"
 
+    # W10：探针**量不到东西**时，整条链不许出 rc=0。
+    #   实发形状（2026-09-28 真仓 dsh-launcher）：清单默认 mutationTargets=src，该仓没有 src，
+    #   探针静默跳过不存在的目标 ⇒ 0 候选 + exit 0 + 不写报告，D 段差点被当成"强度量过了"。
+    #   修法两处：探针 0 候选 ⇒ rc=3 且报告照写；执行器把"步骤非零"升格为阶段失败。
+    $r10 = Run ($base + @('-Profile', 'gate', '-MutationTargets', 'no-such-dir', '-Confirm', 'B'))
+    $run10 = [regex]::Match($r10.out, '\[wf\] run\s+(\S+)').Groups[1].Value
+    $stepRc = -9; $stepVer = '查不到'
+    if ($run10 -and (Test-Path -LiteralPath (Join-Path $run10 'gates.json'))) {
+        try {
+            $gj = Get-Content -LiteralPath (Join-Path $run10 'gates.json') -Raw | ConvertFrom-Json
+            $e = @($gj.entries | Where-Object { $_.kind -eq 'step' -and $_.id -eq 'mutation-probe' })
+            if ($e.Count -gt 0) { $stepRc = $e[0].rc; $stepVer = $e[0].verdict }
+        } catch {}
+    }
+    Chk 'W10 量不到强度时整体判失败' ($r10.rc -eq 1 -and $r10.out -match '停在 D/') "rc=$($r10.rc) 停点=$(if ($r10.out -match '停在 (D/\S+)') {$matches[1]} else {'?'})"
+    Chk 'W10b 探针步骤按 rc=3 记账' ($stepRc -eq 3 -and $stepVer -eq 'fail') "step rc=$($stepRc) verdict=$($stepVer)"
+    Chk 'W10c 报告仍落盘（写明没量到）' ((Test-Path -LiteralPath (Join-Path $run10 'mutation-report.md')) -or ($r10.out -match '报告已写入')) "报告落盘标记=$($r10.out -match '报告已写入')"
+
+    # W11：给"步骤非零 ⇒ 阶段判不过"这条规则单独配证人。
+    #   W10 里 D-g3 先判了失败，所以那条新规则其实没被触到 —— 没有证人的强制规则就是在装饰。
+    #   做法：拿真清单改合成一个阶段，**门设计成会过**、步骤设计成 rc=7，看整体还报不报"通过"。
+    # ★ 读写都必须显式 UTF8：PS 5.1 的 Get-Content 默认按 ANSI(GBK) 解，清单里的中文会变乱码，
+    #   ConvertFrom-Json 接着报"应为 : 或 }"——长得像清单坏了，其实是读法坏了。
+    $mfRaw = [System.IO.File]::ReadAllText((Join-Path $skillRoot 'workflow\legacy-refactor-flow.workflow.json'), [System.Text.Encoding]::UTF8)
+    $mf = ConvertFrom-Json $mfRaw
+    $mf.phases = @([pscustomobject]@{
+        id = 'Z'; name = 'synthetic'; goal = 'witness the step-failure rule'
+        steps = @([pscustomobject]@{ kind = 'cmd'; cmd = 'node -e "process.exit(7)"'; desc = 'step7' },
+                  [pscustomobject]@{ kind = 'cmd'; cmd = 'node -e "process.exit(0)"'; desc = 'step0' })
+        gates = @([pscustomobject]@{ id = 'Z-g1'; op = 'exists'; path = '{kitDir}/SCOPE.md'; desc = 'this gate passes' })
+    })
+    foreach ($pk in @($mf.profiles.PSObject.Properties.Name)) { $mf.profiles.$pk.phases = @('Z') }
+    $zman = Join-Path $sb 'z-manifest.json'
+    [System.IO.File]::WriteAllText($zman, (ConvertTo-Json -InputObject $mf -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    $r11 = Run @('-RepoPath', $repo, '-TestCmd', 'node --test strong/all.test.js', '-Profile', 'full', '-Manifest', $zman)
+    Chk 'W11 门全过但步骤非零：整体判失败' ($r11.rc -eq 1 -and $r11.out -match 'Z-g1\] 过' -and $r11.out -match 'rc=7') "rc=$($r11.rc) 门过=$($r11.out -match 'Z-g1\] 过') 步骤 rc=7 在册=$($r11.out -match 'rc=7')"
+    Chk 'W11b 失败原因指到步骤而非门' ($r11.out -match '步骤非零' -and $r11.out -match '停在 D|step:step7') "停点写法=$(if ($r11.out -match '停在 ([^\s。]+)') {$matches[1]} else {'?'})"
+
     # W3 密封核对：原样应通过
     $r3 = Run @('-VerifySeal', '-RunDir', $runDir)
     Chk 'W3 原样密封核对通过' ($r3.rc -eq 0) "rc=$($r3.rc)"
