@@ -64,6 +64,26 @@ function Test-Noise([string]$p) {
     return $false
 }
 
+# 逐行分型：装饰线（`====` 这类 RST 下划线 / 分隔条）、注释、docstring 区、代码。
+# 为什么要这个：真仓实测过一轮，`======================` 一行就贡献 7 个"漏放"，
+# 把得分从 0.43 压到 0.30 —— 变异名额被等号线吃掉近一半，分数还被系统性压低。
+# 这是**启发式**（不是词法器）：字符串字面量里的 token 仍可能被误跳/误采。
+function Get-LineTags([string[]]$lines) {
+    $tags = @()
+    $inside = $false
+    foreach ($ln in $lines) {
+        $trips = ([regex]::Matches($ln, '"""')).Count + ([regex]::Matches($ln, "'''")).Count
+        $t = 'code'
+        if ($ln.Trim().Length -gt 0 -and $ln -match '^[\s=\-\*_\#~]+$') { $t = 'banner' }
+        elseif ($ln -match '^\s*(#|%|//|/\*|\*)') { $t = 'comment' }
+        elseif ($inside) { $t = 'docstring' }
+        elseif ($trips -gt 0) { $t = 'docstring' }
+        $tags += $t
+        if (($trips % 2) -eq 1) { $inside = -not $inside }
+    }
+    return $tags
+}
+
 # ---------- 1. 副本 ----------
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("lrf-mut-" + $stamp + "-" + (Get-Random -Maximum 9999))
@@ -141,33 +161,60 @@ if ($base.timedOut -or -not $base.ok -or $base.rc -ne 0) {
 }
 Write-Host "[mut] BASELINE=green"
 
-# ---------- 3. 枚举变异点 ----------
-$mutants = New-Object System.Collections.Generic.List[object]
+# ---------- 3. 枚举变异点（两阶段：先数清全仓候选，再取前 MaxMutants）----------
+# 为什么要先数：只看"本轮 30 个"会把抽样当全仓 —— 实测在 dsh-launcher 上，
+# 整仓那一跑 30 个名额全花在前三个文件上，最大的两个模块一个没碰到，报出来的 0.000 是抽样截断，不是全仓结论。
+$allRows = New-Object System.Collections.Generic.List[object]
+$avail = [ordered]@{}
+$samp  = [ordered]@{}
+$scanCap = 5000
+$scanTrunc = $false
 foreach ($t in $Targets) {
     $tp = if ([System.IO.Path]::IsPathRooted($t)) { $t } else { Join-Path $work $t }
     if (-not (Test-Path -LiteralPath $tp)) { continue }
     $files = if ((Get-Item -LiteralPath $tp).PSIsContainer) {
         @(Get-ChildItem -LiteralPath $tp -Recurse -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $exts -contains $_.Extension.ToLower() -and -not ($_.FullName -match $testRe) })
+            Where-Object { $exts -contains $_.Extension.ToLower() -and -not ($_.FullName -match $testRe) } |
+            Sort-Object FullName)
     } else { @((Get-Item -LiteralPath $tp)) }
     foreach ($f in $files) {
+        $relF = $f.FullName.Substring($work.Length).TrimStart('\', '/')
         $lines = @([System.IO.File]::ReadAllLines($f.FullName))
+        $tags = @(Get-LineTags $lines)
+        $cnt = 0
         for ($i = 0; $i -lt $lines.Count; $i++) {
-            $ln = $lines[$i]
-            if ($ln -match '^\s*(//|#|/\*|\*)') { continue }          # 注释里的不算
-            foreach ($m in [regex]::Matches($ln, $pat)) {
-                $tok = $m.Value
-                $to = Get-Mutant $tok
+            if ($i -ge $tags.Count -or $tags[$i] -ne 'code') { continue }   # 装饰线/注释/docstring 一律不注
+            foreach ($m in [regex]::Matches($lines[$i], $pat)) {
+                $to = Get-Mutant $m.Value
                 if (-not $to) { continue }
-                $mutants.Add([pscustomobject]@{ File = $f.FullName; Line = $i; Tok = $tok; To = $to; At = $m.Index })
-                if ($mutants.Count -ge $MaxMutants) { break }
+                $cnt++
+                if ($allRows.Count -lt $scanCap) {
+                    $allRows.Add([pscustomobject]@{ File = $f.FullName; Rel = $relF; Line = $i; Tok = $m.Value; To = $to; At = $m.Index })
+                } else { $scanTrunc = $true }
             }
-            if ($mutants.Count -ge $MaxMutants) { break }
         }
-        if ($mutants.Count -ge $MaxMutants) { break }
+        if (-not $avail.Contains($relF)) { $avail[$relF] = 0; $samp[$relF] = 0 }
+        $avail[$relF] += $cnt
+        if ($scanTrunc) { break }
     }
+    if ($scanTrunc) { break }
 }
-Write-Host "[mut] 变异点 $($mutants.Count) 个（上限 $MaxMutants，按文件序→行序→列序截断）"
+$mutants = @()
+if ($allRows.Count -gt 0) {
+    $take = $MaxMutants
+    if ($take -gt $allRows.Count) { $take = $allRows.Count }
+    $mutants = @($allRows.GetRange(0, $take))
+}
+foreach ($mu in $mutants) { if ($samp.Contains($mu.Rel)) { $samp[$mu.Rel] += 1 } }
+$totalAvail = 0
+foreach ($k in $avail.Keys) { $totalAvail += $avail[$k] }
+$zeroFiles = @($avail.Keys | Where-Object { $samp[$_] -eq 0 -and $avail[$_] -gt 0 })
+$missedPts = $totalAvail - $mutants.Count
+Write-Host ("[mut] 候选点合计 $totalAvail 个，本轮取 $($mutants.Count) 个（上限 $MaxMutants，按文件序→行序→列序截断）")
+if ($zeroFiles.Count -gt 0 -or $missedPts -gt 0) {
+    Write-Host ("[mut] ★ 这是**抽样**不是全仓：$($zeroFiles.Count) 个文件一个没采到，还有 $missedPts 个候选点没进本轮。得分只代表本轮采到的那些位置。")
+    foreach ($z in ($zeroFiles | Select-Object -First 12)) { Write-Host ("        未采到: " + $z + "（候选 " + $avail[$z] + " 个）") }
+}
 if ($mutants.Count -eq 0) {
     Write-Host "[mut] MUT score=0 killed=0 total=0 probed=0 undecided=0 baseline=green source=builtin-textual"
     Write-Host "[mut] 一个可变异点都没有 —— 目标选错了（-Targets 给的是不是测试目录？），这个 0 不代表裁判强。"
@@ -188,6 +235,17 @@ foreach ($mu in $mutants) {
     $newLine = $line.Substring(0, $mu.At) + $mu.To + $line.Substring($mu.At + $mu.Tok.Length)
     $trial = @($orig.Clone()); $trial[$mu.Line] = $newLine
     [System.IO.File]::WriteAllLines($fp, $trial)
+    # 改动自证：注完回读，确认真与基线不同。读 dsh-mutate.py 时被它一句注释点出来——
+    # "锚点不匹配 → 变异体被静默跳过 = 这条修复失去守护"。写没落地就把这格当"漏放/抓住"判，
+    # 量的是空气。没变就记无法判定并踢出分母。
+    $back = @([System.IO.File]::ReadAllLines($fp))
+    if (($back -join "`n") -eq ($orig -join "`n")) {
+        $undecided++
+        [System.IO.File]::WriteAllLines($fp, $orig)
+        $rel0 = $fp.Substring($work.Length).TrimStart('\', '/')
+        Write-Host ("  [{0}/{1}] 无法判定  {2}:{3}  {4} -> {5}  <= 写入未生效（注完与原文逐行相同），这格踢出分母" -f $n, $mutants.Count, $rel0, ($mu.Line + 1), $mu.Tok, $mu.To)
+        continue
+    }
     $r = Run-Tests $work
     [System.IO.File]::WriteAllLines($fp, $orig)      # 立刻还原，下一个变异从同一起点出发
     $rel = $fp.Substring($work.Length).TrimStart('\', '/')
@@ -218,6 +276,8 @@ $L.Add("- 目标仓：``$root``")
 $L.Add("- 测试命令：``$TestCmd``")
 $L.Add("- **变异来源：内置文本级兜底**（未驱动 Stryker/mutmut/cargo-mutants）")
 $L.Add("- 变异点 $($mutants.Count) 个（判了 $evaluated 个）：抓住 $killed，漏放 $($survived.Count)，无法判定 $undecided —— **得分 $score**")
+$L.Add("- 候选点合计 $totalAvail 个 / $($avail.Count) 个文件；本轮只取 $($mutants.Count) 个，剩余 $missedPts 个未进本轮")
+if ($scanTrunc) { $L.Add("- ⚠ 扫描在 $scanCap 个候选点处截断，`候选点合计` 是**下界**") }
 $L.Add("- 工作副本：``$work``" + $(if ($KeepWork) { "（保留）" } else { "（已删）" }))
 $L.Add("")
 $L.Add("## 1. 漏放清单（这才是本报告的用途）")
@@ -230,15 +290,27 @@ if ($survived.Count -gt 0) {
     foreach ($s in $survived) { $L.Add("| ``$($s.Rel):$($s.Line)`` | ``$($s.From)`` | ``$($s.To)`` |") }
 } else { $L.Add("（无漏放）") }
 $L.Add("")
+$L.Add("## 1b. 本轮覆盖面（防「把抽样当全仓」）")
+$L.Add("")
+$L.Add("| 文件 | 候选点 | 本轮采到 |")
+$L.Add("|---|---|---|")
+foreach ($k in $avail.Keys) { $L.Add("| ``$k`` | $($avail[$k]) | $($samp[$k]) |") }
+$L.Add("")
+if ($zeroFiles.Count -gt 0) {
+    $L.Add("**有 $($zeroFiles.Count) 个文件一个点都没采到**（上表采到列为 0 的那些）⇒ 本得分不覆盖它们，别说成全仓得分。")
+}
+$L.Add("")
 $L.Add("## 2. 这个数不能说明什么")
 $L.Add("")
 $L.Add("- **只是下限证据**：内置兜底只做比较符/边界/布尔三类，覆盖面比工具窄得多；得分高不等于裁判强。")
+$L.Add("- **枚举阶段按启发式跳过了装饰线 / 注释 / 三引号 docstring**（真仓实测：一行 `====================` 能贡献 7 个假漏放，把得分从 0.43 压到 0.30）。")
+$L.Add("  这是**启发式不是词法器**：写在字符串字面量里的 `==`、`True` 仍可能被误采或误跳 ⇒ 分数只能横向比自己，不能当绝对度量。")
 $L.Add("- **等价变异体未剔除**：注进去的改动若恰好不改变行为，测试本来就不该红，这类会被误计成""漏放""。")
 $L.Add("- **触达率未知**：变异点若落在根本没被任何测试执行的代码上，必然显示为漏放 —— 那说明的是覆盖，不是裁判。")
 $L.Add("- 装了 Stryker / mutmut / cargo-mutants / PIT 的，请按其原生配置再跑一遍并把得分并进来：")
 $L.Add("  ``npx stryker run`` ／ ``mutmut run`` + ``mutmut junitxml`` ／ ``cargo mutants``")
 $L.Add("")
-$machine = "[mut] MUT score=$score killed=$killed total=$evaluated probed=$($mutants.Count) undecided=$undecided baseline=green source=builtin-textual"
+$machine = "[mut] MUT score=$score killed=$killed total=$evaluated probed=$($mutants.Count) avail=$totalAvail uncov=$missedPts zero-files=$($zeroFiles.Count) undecided=$undecided baseline=green source=builtin-textual"
 $L.Add("## 3. 机器读数")
 $L.Add("")
 $L.Add('```')

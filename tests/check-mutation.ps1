@@ -40,16 +40,18 @@ function Skp($name, $why) { Write-Host ("  [SKIP] {0,-28} {1}" -f $name, $why); 
 
 $sh = if ($env:OS -eq 'Windows_NT') { 'powershell' } else { 'pwsh' }
 $shArgs = if ($env:OS -eq 'Windows_NT') { @('-NoProfile','-ExecutionPolicy','Bypass','-File') } else { @('-NoProfile','-File') }
-function Probe($repoArg, $testCmd, $targets) {
+function Probe($repoArg, $testCmd, $targets, $maxM) {
+    if (-not $maxM) { $maxM = 40 }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
-        $txt = & $sh ($shArgs + [string[]]@($Script, '-Repo', $repoArg, '-TestCmd', $testCmd, '-Targets', $targets, '-TimeoutSec', '60')) 2>&1 | Out-String
+        $txt = & $sh ($shArgs + [string[]]@($Script, '-Repo', $repoArg, '-TestCmd', $testCmd, '-Targets', $targets, '-MaxMutants', "$maxM", '-TimeoutSec', '60')) 2>&1 | Out-String
         $rc = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prev }
-    $o = [pscustomobject]@{ rc = $rc; score = -1.0; killed = -1; total = -1; txt = $txt }
+    $o = [pscustomobject]@{ rc = $rc; score = -1.0; killed = -1; total = -1; avail = -1; uncov = -1; txt = $txt }
     if ($txt -match 'MUT score=([0-9.]+) killed=(\d+) total=(\d+)') {
         $o.score = [double]$matches[1]; $o.killed = [int]$matches[2]; $o.total = [int]$matches[3]
     }
+    if ($txt -match 'avail=(\d+) uncov=(\d+)') { $o.avail = [int]$matches[1]; $o.uncov = [int]$matches[2] }
     return $o
 }
 
@@ -60,8 +62,11 @@ try {
     # ---------- 夹具 ----------
     New-Item -ItemType Directory -Force -Path (Join-Path $repo "src"), (Join-Path $repo "strong"), (Join-Path $repo "weak"), (Join-Path $repo "broken"), (Join-Path $repo "src-empty") | Out-Null
     # 9 个可变异点：>= true false / < / > !== / <= / === / >（never 没人测）
+    # 头两行注释里**故意塞进变异符**：枚举阶段若不分词法，这些会变成假变异点、把得分压低
     [System.IO.File]::WriteAllText((Join-Path $repo "src\calc.js"), (@"
 'use strict';
+// 注释里的 0 分母 a >= 18、b !== 9、c === 7 都不该被注
+/* 块注释里也有 > 和 < 与 true */
 function adult(x) { if (x >= 18) { return true } return false }
 function teen(x) { return x < 13 }
 function pick(x) { if (x > 5 && x !== 9) { return 1 } return 2 }
@@ -126,11 +131,60 @@ test('故意红', () => { t.equal(1, 2); });
     $zero = Probe $repo "node --test strong/all.test.js" "src-empty"
     Chk 'M5 零变异点不许当好消息' ($zero.total -eq 0 -and $zero.txt -match '不代表裁判强') ("total=$($zero.total) rc=$($zero.rc)")
 
+    # M10：词法过滤的真覆盖。JS 注释旧版就跳，所以证明不了新逻辑；这里用 Python 夹具：
+    #   装饰线 `==================` 含 9 个 `==`、docstring 那行含 `==` `>` `True` 3 个，
+    #   真代码只有 `>=` `True` `False` 3 个。不过滤的话 avail 会报 15（且得分被压到 0.2）。
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if (-not $py) { Skp 'M10 装饰线/docstring 不算候选' '本机没有 py 启动器' }
+    else {
+        $pyrepo = Join-Path $sb "pyrepo"
+        New-Item -ItemType Directory -Force -Path $pyrepo | Out-Null
+        # 单引号 here-string：不插值，`"""` 原样落盘（上一版用双引号拼三引号，拼坏了 Python 文件，
+        # 结果 baseline 直接红、探针拒跑，报出来的 -1 看着像"过滤没生效"，其实是夹具坏了）
+        $calcSrc = @'
+# -*- coding: utf-8 -*-
+"""
+说明
+==================
+这里写 a == b 与 x > y，还有 True
+"""
+
+def adult(x):
+    if x >= 18:
+        return True
+    return False
+'@
+        $checkSrc = @'
+import sys
+from calc import adult
+bad = 0
+if adult(18) is not True:
+    bad += 1
+if adult(17) is not False:
+    bad += 1
+sys.exit(1 if bad else 0)
+'@
+        [System.IO.File]::WriteAllText((Join-Path $pyrepo "calc.py"), ($calcSrc -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $pyrepo "check.py"), ($checkSrc -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $p3 = Probe $pyrepo "py -3 -X utf8 check.py" "calc.py" 40
+        Chk 'M10 非代码 token 不算候选点' ($p3.avail -eq 3) "avail=$($p3.avail)（真代码 3；不过滤会是 15）score=$($p3.score)"
+        Chk 'M10b 全漏放的假低分不再出现' ($p3.score -eq 1) "得分 $($p3.score)（旧探针会把装饰线当漏放，压到 0.2）"
+    }
+
     # 工作副本用完必须删（探针自己清干净）。不用 -Filter：Windows 的 8.3 短名会让
     # "lrf-mut-*" 匹配到意料之外的东西；直接按名字正则取探针工作副本（时间戳开头是数字）。
     $left = @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -cmatch '^lrf-mut-\d{8}-\d{6}-' })
     Chk 'M6 探针没留工作副本' ($left.Count -eq 0) "残留 $($left.Count) 个 lrf-mut-* 目录"
+
+    # 覆盖面自曝（防「把抽样当全仓」）：机器行必须带 avail=/uncov=，且截断时 uncov 要对得上。
+    # 这里只断 ASCII 计数，不断那行中文警告 —— 码页继承会让中文断言偏严不偏松，但按本仓规矩，
+    # 判据一律优先用机器读数（见 check-recon 里的同款注释）。
+    $full = Probe $repo "node --test strong/all.test.js" "src" 40
+    Chk 'M7 覆盖计数自曝 avail/uncov' ($full.avail -eq 9 -and $full.uncov -eq 0) "avail=$($full.avail)（期望 9）uncov=$($full.uncov)（期望 0）"
+    $cut = Probe $repo "node --test strong/all.test.js" "src" 3
+    Chk 'M8 名额截断要报未覆盖数' ($cut.uncov -eq 6 -and $cut.total -le 3 -and $cut.avail -eq 9) ("名额 3：avail=$($cut.avail) uncov=$($cut.uncov)（期望 9/6），本轮判了 $($cut.total)")
+    Chk 'M9 抽样分与全量分不同值' ($cut.score -ne $full.score -or $cut.total -ne $full.total) "截断跑 score=$($cut.score) 判了 $($cut.total)；全量跑 score=$($full.score) 判了 $($full.total)"
 } catch {
     if ($_.Exception.Message -ne 'skip') { Write-Host ("  [X ] 测试自身异常: " + $_.Exception.Message); $bad++ }
 } finally {
