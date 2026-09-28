@@ -12,6 +12,13 @@
 // 未验证声明：本机 `qodercli status` = Not logged in，作者环境无法非交互登录，
 //   所以本文件**没有跑通过**。语法照文档写，agent()/phase()/args 的精确签名以
 //   `qodercli` 实际加载结果为准；第一次登录后必须先做"阶段数对不对、人工门能不能拦住"两条验证。
+//
+// 装出来的实况（2026-09-28 实测，与文档有三处不符，别照文档指挥）：
+//   · 安装脚本装的是 qodercli 1.1.64，落点 ~/.qoder/bin/qodercli/，命令名是 qodercli 而文档写的是 qoder；
+//   · qodercli --help 的 Commands 面里**没有** workflows 子命令（只有 mcp / plugins / skills / hooks /
+//     agents / login / status / commit / security / wiki …）⇒ 工作流入口只在 TUI 里（文档称 /workflows）；
+//   · 二进制里能搜到字符串 "export const meta"（11 处）与 "workflows/"（11 处），
+//     但搜不到字面 ".qoder/workflows"（多半是运行时拼路径）⇒ "到底放哪个目录"这条**尚未被证实**。
 
 export const meta = {
   name: "legacy-refactor",
