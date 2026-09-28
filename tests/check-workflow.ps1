@@ -223,7 +223,7 @@ test('边界', () => { t.equal(c.adult(18), true); t.equal(c.adult(17), false); 
     $costTool = Join-Path $sb 'cost-tool\mkcost.js'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $costTool) | Out-Null
     [System.IO.File]::WriteAllText($costTool, ("const fs=require('fs'),os=require('os');fs.mkdirSync(os.tmpdir()+'/" + $costTag + "-'+process.pid+'-'+Date.now());process.exit(0);"), (New-Object System.Text.UTF8Encoding($false)))
-    $b13 = @('-RepoPath', $repo, '-TestCmd', ("node --test strong/all.test.js && node " + $costTool), '-MaxMutants', '12')
+    $b13 = @('-RepoPath', $repo, '-TestCmd', ("node " + $costTool + " && node --test strong/all.test.js"), '-MaxMutants', '12')
     $r13 = Run ($b13 + @('-Confirm', 'A,B,C,D,E,T'))
     $run13 = [regex]::Match($r13.out, '\[wf\] run\s+(\S+)').Groups[1].Value
     $unk13 = ''
@@ -277,9 +277,12 @@ test('边界', () => { t.equal(c.adult(18), true); t.equal(c.adult(17), false); 
         }
         foreach ($rd in $madeRuns) { if (($mine -notcontains $rd) -and (Test-Path -LiteralPath $rd)) { $mine += $rd } }
         if (Test-Path -LiteralPath $sb) { Remove-Item -LiteralPath $sb -Recurse -Force }
-        # W13 造的代价目录在被检仓之外（本机 TEMP），沙箱删不到它 —— 本夹具自己写的，自己收
-        foreach ($cd in @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter 'wfchk-cost-*' -ErrorAction SilentlyContinue)) {
-            Remove-Item -LiteralPath $cd.FullName -Recurse -Force
+        # W13 造的代价目录在被检仓之外（本机 TEMP），沙箱删不到它 —— 本夹具自己写的，自己收。
+        # 只按本轮 tag 前缀收，并发跑两个自检时不许删对方的证据。
+        if ($costTag) {
+            foreach ($cd in @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter ($costTag + '*') -ErrorAction SilentlyContinue)) {
+                Remove-Item -LiteralPath $cd.FullName -Recurse -Force
+            }
         }
         foreach ($rd in $mine) {
             if (-not (Test-Path -LiteralPath $rd)) { continue }

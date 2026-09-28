@@ -193,16 +193,23 @@ sys.exit(1 if bad else 0)
 
     # M13：跑裁判的代价必须量得出来。靶仓自带的测试常往本机 TEMP 写件（真仓 dsh_tests.py 每个用例
     # mkdtemp 不删），而探针要把这条测试命令**重跑 N+1 遍** ⇒ 探针得报 temp-new，
-    # 且不许把自己的工作副本（lrf-*）算进去。反向证人 M13b：不写 TEMP 的夹具必须报 0。
+    # 且不许把自己的工作副本（lrf-*）算进去。反向证人 M13b 是一条**序**断言（不写件的轮次明显更少），
+    # 不是"必须报 0"——理由写在 M13b 那一段。
     # 造代价的脚本放在 $repo **之外**：否则 -Targets . 的那一轮会把它当变异点。
     $costTag = 'mutchk-cost-' + (Split-Path -Leaf $sb)
-    $costDir = Join-Path ([System.IO.Path]::GetTempPath()) $costTag
     $costTool = Join-Path $sb 'cost-tool\mkcost.js'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $costTool) | Out-Null
-    [System.IO.File]::WriteAllText($costTool, ("const fs=require('fs'),os=require('os');fs.mkdirSync(os.tmpdir()+'/" + $costTag + "',{recursive:true});process.exit(0);"), (New-Object System.Text.UTF8Encoding($false)))
-    $cost = Probe $repo ("node --test strong/all.test.js && node " + $costTool) "src"
-    Chk 'M13 测试命令往 TEMP 写件要报代价' ($cost.tempNew -ge 1 -and (Test-Path -LiteralPath $costDir)) "temp-new=$($cost.tempNew) 目录真在=$([bool](Test-Path -LiteralPath $costDir))"
-    Chk 'M13b 不写 TEMP 的夹具必须报 0' ($strong.tempNew -eq 0) "强集那轮 temp-new=$($strong.tempNew)（探针自己的 lrf-* 已排除）"
+    # 每次调用建**唯一名**：固定名的话十轮全落在同一个目录上，计数永远是 1，测不出"重跑 N+1 遍"这个代价的量级
+    [System.IO.File]::WriteAllText($costTool, ("const fs=require('fs'),os=require('os');fs.mkdirSync(os.tmpdir()+'/" + $costTag + "-'+process.pid+'-'+Date.now());process.exit(0);"), (New-Object System.Text.UTF8Encoding($false)))
+    # ★ 顺序要紧：代价脚本必须放在 `&&` **前面**。放后面的话，变异体把测试跑红时后半段被短路跳过，
+    #   十轮里只有基线和漏放那轮真建目录（实测 temp-new 从 10 掉到 2），差值太薄、挡不住同时段的无关写入。
+    $cost = Probe $repo ("node " + $costTool + " && node --test strong/all.test.js") "src"
+    $costMade = @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter ($costTag + '*') -ErrorAction SilentlyContinue)
+    Chk 'M13 测试命令往 TEMP 写件要报代价' ($cost.tempNew -ge 5 -and $costMade.Count -ge 5) "temp-new=$($cost.tempNew) 实建目录 $($costMade.Count) 个（设计：1 基线 + 9 变异点，每轮一个）"
+    # M13b 原来是"不写 TEMP 的夹具必须报 0"——**这条在活机器上不成立**：无关进程随时往 TEMP 根写件
+    # （实测撞上过的有 Java 的 hsperfdata_*、安装器的 *.tmp、JavaLauncher.log），快照窗口里冒出来
+    # 就会被记成新件 ⇒ 绝对 0 的判据会随机红。改成**序**断言：写件的那轮必须明显多于不写的那轮。
+    Chk 'M13b 写件的轮次必须多于不写的轮次' ($cost.tempNew -ge $strong.tempNew + 3) "写件轮 $($cost.tempNew) vs 不写轮 $($strong.tempNew)（差值要求 >=3，挡无关进程的零星写入）"
 
     # 工作副本用完必须删（探针自己清干净）。不用 -Filter：Windows 的 8.3 短名会让
     # "lrf-mut-*" 匹配到意料之外的东西；直接按名字正则取探针工作副本（时间戳开头是数字）。
@@ -223,8 +230,13 @@ sys.exit(1 if bad else 0)
 } finally {
     if ($KeepSandbox) { Write-Host "[mutation] 沙箱留着：$sb" }
     elseif (Test-Path -LiteralPath $sb) { Remove-Item -LiteralPath $sb -Recurse -Force }
-    # M13 造的代价目录是本夹具自己写的，不是探针工作副本 —— 沙箱删不掉它，得单独收
-    if ($costDir -and (Test-Path -LiteralPath $costDir)) { Remove-Item -LiteralPath $costDir -Recurse -Force }
+    # M13 造的代价目录在被检仓之外（本机 TEMP），沙箱删不到它 —— 本夹具自己写的，自己收。
+    # 只按**本轮 tag 前缀**收，不扫全量 mutchk-cost-*：并发跑两个自检时不许互相删对方的证据。
+    if ($costTag) {
+        foreach ($cd in @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter ($costTag + '*') -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $cd.FullName -Recurse -Force
+        }
+    }
 }
 Write-Host ""
 if ($bad -gt 0) { Write-Host "[mutation] 失败 $bad 项 / 通过 $pass 项 / SKIP $skip"; exit 1 }

@@ -276,7 +276,7 @@ foreach ($ph in $mf.phases) {
                 # 拆除阶段只看登记过的写入域 ⇒ 这类件必须记 unknown，不许当"已拆干净"。
                 if ($mt -match 'temp-new=(\d+)') {
                     $tn = [int]$matches[1]
-                    if ($tn -gt 0) { $unknown.Add("跑裁判的代价：测试命令在 TEMP 新留 $tn 个非探针件 ⇒ 本机 TEMP 不在拆除阶段的视野里，算未清") }
+                    if ($tn -gt 0) { $unknown.Add("跑裁判的代价：本轮跑测试期间 TEMP 新增 $tn 个非探针件（分不清是靶仓测试写的还是同时段别的进程写的）⇒ 本机 TEMP 不在拆除阶段的视野里，算未清") }
                 }
             } else { $unknown.Add('裁判强度报告里没有 MUT 机器读数行 —— 读数缺失，别引用它的分') }
         }
