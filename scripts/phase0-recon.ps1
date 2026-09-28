@@ -178,7 +178,45 @@ if ($WithDup -and $tools['jscpd']) {
 } elseif ($WithDup) { $dupNote = "请求了 -WithDup 但未安装 jscpd" }
 
 # ---------- 4. 基础设施 / 入口点 / 目录 ----------
-$entries = @($code | Where-Object { $b = $_.BaseName.ToLower(); ($b -eq 'main' -or $b -eq 'index' -or $b -eq 'app' -or $b -eq 'server' -or $b -eq 'cli' -or $b -eq 'program' -or $b -eq 'manage' -or $b -eq 'bootstrap' -or $b -eq 'wsgi' -or $b -eq 'asgi' -or $b -eq 'start') })
+# 入口点不能靠**名字**认：真实 CLI 仓的模块可以叫任何名字（本机实测：一个 9 模块的工具链
+# 按名字白名单命中 0 个，而按结构判据命中 5 个）。改成两路并集：名字 + 结构。
+$nameHits = @($code | Where-Object { $b = $_.BaseName.ToLower(); ($b -eq 'main' -or $b -eq 'index' -or $b -eq 'app' -or $b -eq 'server' -or $b -eq 'cli' -or $b -eq 'program' -or $b -eq 'manage' -or $b -eq 'bootstrap' -or $b -eq 'wsgi' -or $b -eq 'asgi' -or $b -eq 'start') })
+$entryRows = New-Object System.Collections.Generic.List[object]
+foreach ($f in $nameHits) {
+    $entryRows.Add([pscustomobject]@{ Rel = (Get-Rel $f.FullName); Why = '名字白名单' })
+}
+# bat / cmd 放在仓根就是给人双击或调用的入口，不看名字
+foreach ($f in @(Get-ChildItem -LiteralPath $root -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension.ToLower() -in @('.bat', '.cmd') })) {
+    $entryRows.Add([pscustomobject]@{ Rel = (Get-Rel $f.FullName); Why = '仓根批处理入口' })
+}
+# 结构判据：py 的 __main__ 守卫、任何脚本的 shebang、js 的 require.main
+$guardCap = 400
+$guardScanned = 0
+$guardTrunc = $false
+$cands = @($code | Where-Object { $_.Length -lt 400000 -and $_.Extension.ToLower() -in @('.py', '.sh', '.rb', '.pl', '.js', '.mjs', '.cjs', '.ts') } | Sort-Object Length -Descending)
+$already = @{}
+foreach ($r in $entryRows) { $already[$r.Rel.ToLower()] = 1 }
+foreach ($f in $cands) {
+    if ($guardScanned -ge $guardCap) { $guardTrunc = $true; break }
+    $rel = (Get-Rel $f.FullName)
+    if ($already.ContainsKey($rel.ToLower())) { continue }
+    $guardScanned++
+    $hit = ''
+    $head = ''
+    try { $head = @(Get-Content -LiteralPath $f.FullName -TotalCount 2 -ErrorAction Stop) -join "`n" } catch {}
+    if ($head -match '(?m)^#!') { $hit = 'shebang' }
+    if (-not $hit -and $f.Extension.ToLower() -eq '.py') {
+        if (Select-String -LiteralPath $f.FullName -Pattern '__name__\s*==\s*["'']__main__' -Quiet -ErrorAction SilentlyContinue) { $hit = '__main__ 守卫' }
+    }
+    if (-not $hit -and $f.Extension.ToLower() -in @('.js', '.mjs', '.cjs')) {
+        if (Select-String -LiteralPath $f.FullName -Pattern 'require\.main\s*===\s*module' -Quiet -ErrorAction SilentlyContinue) { $hit = 'require.main 守卫' }
+    }
+    if ($hit) { $entryRows.Add([pscustomobject]@{ Rel = $rel; Why = $hit }); $already[$rel.ToLower()] = 1 }
+}
+# 注意：@($list) 作用在 Generic.List[object] 上，本机 PowerShell 会抛
+# ArgumentException「参数类型不匹配」（最小复现过）—— 要成数组就走 ToArray()。
+$entries = $entryRows.ToArray()
 $infra = @()
 $infraNames = @('package.json','pytest.ini','pyproject.toml','setup.cfg','tox.ini','Makefile','go.mod','Cargo.toml','pom.xml','build.gradle','composer.json','requirements.txt','Dockerfile','docker-compose.yml','.github','.gitlab-ci.yml','Jenkinsfile','conftest.py','tests','test')
 foreach ($m in $infraNames) {
@@ -234,11 +272,33 @@ $L.Add($dupNote)
 $L.Add("")
 $L.Add("## 5. 测试基础设施现状")
 $L.Add("")
-if ($infra.Count -gt 0) { $L.Add("检测到：" + ($infra -join ", ")) } else { $L.Add("**未检测到任何测试/构建配置文件 —— 从零开始造裁判。**") }
+if ($infra.Count -gt 0) {
+    $L.Add("命中配置文件：" + ($infra -join ", "))
+    if ($test.Count -gt 0) { $L.Add("另外按命名/结构识别出 " + $test.Count + " 个测试文件。") }
+} elseif ($test.Count -gt 0) {
+    # 关键：报告头部已经算出"测试文件 N 个"，这一节绝不能再说"从零开始造裁判"——
+    # 那是同一份报告里的自相矛盾（本机在一个真实工具链仓上实测发生过）。
+    $L.Add("**配置名单一个没命中，但按命名/结构识别出 " + $test.Count + " 个测试文件 —— 这不是从零开始。** 前 10 个：")
+    foreach ($t in ($test | Select-Object -First 10)) { $L.Add("- " + $tick + (Get-Rel $t.FullName) + $tick) }
+    $L.Add("")
+    $L.Add("> 自带 runner 的仓（没有 pytest.ini / package.json 那类配置文件）就是这种形状。先去 README 或维护文档里找它的跑法，再决定要不要补裁判。")
+} else {
+    $L.Add("**配置文件名单与结构判据两路都没命中 —— 这才叫从零开始造裁判。**")
+}
 $L.Add("")
 $L.Add("## 6. 入口点候选")
 $L.Add("")
-if ($entries.Count -gt 0) { foreach ($e in ($entries | Select-Object -First 25)) { $L.Add("- " + $tick + (Get-Rel $e.FullName) + $tick) } } else { $L.Add("（未按常见命名匹配到，需手工枚举 CLI / HTTP 路由 / cron）") }
+if ($entries.Count -gt 0) {
+    $L.Add("共 " + $entries.Count + " 个（判据：名字白名单 / 仓根批处理 / shebang / ``__main__`` 守卫）")
+    $L.Add("")
+    foreach ($e in ($entries | Select-Object -First 25)) { $L.Add("- " + $tick + $e.Rel + $tick + "  （判据：" + $e.Why + "）") }
+    if ($guardTrunc) {
+        $L.Add("")
+        $L.Add("> 结构判据只扫了前 $guardCap 个脚本文件（按体量降序），**大仓没扫完** ⇒ 这份清单不完备，别按「全部入口」引用它。")
+    }
+} else {
+    $L.Add("（名字白名单与结构判据两路都没命中 —— 入口点要从别处取：build/打包配置里的 main/bin 字段、CI 的运行命令、进程清单，或者直接问用户。）")
+}
 $L.Add("")
 $L.Add("## 7. 一级目录（模块切分候选）")
 $L.Add("")

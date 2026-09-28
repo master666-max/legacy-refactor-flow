@@ -322,7 +322,7 @@ if ($Sweep) {
     Write-Host ("[sweep] HARD=$fatal CHECK=$ask UNCOVERED=" + $unc.Count)
     if ($fatal -gt 0) { Write-Host "[sweep] 发现 $fatal 类硬残留，必须清掉才算收尾。"; exit 1 }
     if ($Strict -and ($ask -gt 0)) { Write-Host "[sweep] -Strict：$ask 项 [?] 未逐一确认，判失败。"; exit 1 }
-    Write-Host "[sweep] 无硬残留（[?] $ask 项需人工确认，未覆盖 " + $unc.Count + " 类需另行核）。"
+    Write-Host "[sweep] 无硬残留（[?] $ask 项需人工确认，未覆盖 $($unc.Count) 类需另行核）。"
     exit 0
 }
 

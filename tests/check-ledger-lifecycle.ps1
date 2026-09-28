@@ -178,6 +178,10 @@ try {
         else { Write-Host "  [X] 15 Sweep 没打 ASCII 汇总行 HARD=/CHECK=/UNCOVERED= —— 上层无法机器读数"; $bad++ }
         if ($base.uncov -ge 1) { Write-Host "  [OK] 15b 未覆盖类别被明写（$($base.uncov) 类）"; $pass++ }
         else { Write-Host "  [X] 15b 未覆盖声明消失 —— 会把'判不了'伪装成'扫过了'"; $bad++ }
+        # 回归：v1.2 曾把人读行写成 `"...未覆盖 " + $unc.Count + " 类..."`，
+        # 参数模式里的 + 不参与拼接，于是打印出字面量 `+ 5 +`。这条断言纯 ASCII，不受码页影响。
+        if ($base.txt -match '\s\+\s') { Write-Host "  [X] 15c 人读输出里漏出字面量 ' + '（参数模式拼接错误）"; $bad++ }
+        else { Write-Host "  [OK] 15c 人读输出无字面量 '+'"; $pass++ }
 
         # CI 配置 + 环境变量文件：§4.1 列了，之前一版根本没查
         New-Item -ItemType Directory -Force -Path (Join-Path $repo ".github\workflows") | Out-Null

@@ -172,12 +172,48 @@ try {
     # R5 测试设施：必须报出子项目里的配置，且不得说"从零开始"
     $sec5 = Sec 5
     Chk 'R5 检出子项目配置' ($sec5 -match [regex]::Escape($EXP_SUB_INI) -and $sec5 -match [regex]::Escape($EXP_SUB_TESTS)) ("期望含 $EXP_SUB_INI + $EXP_SUB_TESTS")
-    Chk 'R5b 不许谎报从零'  ($sec5 -notmatch '从零开始') "报告第 5 节：$($sec5 -replace '\r?\n',' ' )"
+    # R5b 是**绊线**（断旧版那句假结论不再出现）；真正能证伪的是扁平仓的 R9——
+    # 因为旧代码在这份夹具上恰好也不会撒谎（monorepo 扫描早就修过），断言必须是"点名学生"而不是"某词不出现"。
+    Chk 'R5b 旧假结论措辞不再出现' ($sec5 -notmatch '未检测到任何测试/构建配置文件') "报告第 5 节：$($sec5 -replace '\r?\n',' ' )"
 
     # R6 中文提交信息必须逐字可见（打的是"脚本没设码页 → 子进程输出被 GBK 解坏"那条）
     if ($hasGit -and $reproCP) { Chk 'R6 中文提交信息' ($txt -match [regex]::Escape($EXP_CN_COMMIT)) "钉在 OEM 码页 $oemCP 下逐字找: $EXP_CN_COMMIT" }
     elseif (-not $hasGit) { Skp 'R6 中文提交信息' '沙箱没建起 git 历史' }
     else { Skp 'R6 中文提交信息' "取不到非 UTF-8 的出厂码页，构造不出该故障" }
+
+    # ---------- 第二个夹具：扁平 CLI 仓（v1.3 在这两种形状上都说错话）----------
+    # 形状：没有任何测试/构建配置文件，但根目录有个自定义命名的测试模块；
+    #      入口模块的名字都不在白名单里，真正的用户入口是个 .bat。
+    $flat = Join-Path $sb "flat"
+    $flatReport = Join-Path $sb "flat.md"
+    New-Item -ItemType Directory -Force -Path (Join-Path $flat "lib") | Out-Null
+    function Wf($rel, $text) {
+        $p = Join-Path $flat $rel
+        $d = Split-Path -Parent $p
+        if ($d -and -not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        [System.IO.File]::WriteAllText($p, $text, (New-Object System.Text.UTF8Encoding($false)))
+    }
+    Wf 'menu.bat' "@echo off`r`npython tool_runner.py`r`n"
+    Wf 'tool_runner.py' "import lib.core`r`n`ndef main():`r`n    return 0`r`n`nif __name__ == '__main__':`r`n    main()`r`n"
+    Wf 'lib/core.py' "VALUE = 1`r`n"
+    Wf 'self_checks_tests.py' "import unittest`r`n`nclass T(unittest.TestCase):`r`n    def test_a(self):`r`n        self.assertEqual(1, 1)`r`n"
+    # 注意：这里调的是 $Script 本体，不是上面那个码页壳 —— 壳里的 -RepoPath 是写死给第一个夹具的，
+    # 拿它跑扁平仓会静默地又去跑第一个仓（第一版就这么错过了）。R9/R10 与编码无关，不需要壳。
+    $prev2 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        $p2 = & $sh ($shArgs + [string[]]@($Script, '-RepoPath', $flat, '-OutFile', $flatReport, '-TopN', '10')) 2>&1 | Out-String
+        $rc2 = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev2 }
+    if ($rc2 -eq 0 -and (Test-Path -LiteralPath $flatReport)) {
+        $t2 = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($flatReport)) -replace '^﻿', ''
+        function Sec2($n) { $m = [regex]::Match($t2, "(?ms)^## $n\..*?(?=^## \d|\z)"); if ($m.Success) { return $m.Value } return "" }
+        Chk 'R9 扁平仓要点名测试模块' (((Sec2 5) -match 'self_checks_tests\.py') -and ((Sec2 5) -notmatch '两路都没命中')) "第 5 节点名了自定义测试模块，且没走假结论分支"
+        Chk 'R10 结构判据要认出入口' (((Sec2 6) -match 'tool_runner\.py') -and ((Sec2 6) -match 'menu\.bat')) "第 6 节含 tool_runner.py（__main__）与 menu.bat（仓根批处理）"
+        Chk 'R10b 入口点非空' ((Sec2 6) -match '(?m)^-\s') "第 6 节有候选条目"
+    } else {
+        Chk 'R9 扁平仓要点名测试模块' $false "扁平仓这一跑就没成功（rc=$rc2），断言无从做起"
+        Chk 'R10 结构判据要认出入口' $false "同上"
+    }
 
     # R7 报告必须能按严格 UTF-8 解码（BOM 允许，乱码不允许）
     $strict = $true
