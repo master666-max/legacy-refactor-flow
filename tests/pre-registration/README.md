@@ -73,3 +73,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/mutation-probe.ps1 `
 - 过滤后往 `CASES` 里塞了 `(idx, case, 原因)` 三元组 ⇒ 生成的测试 `TypeError`。⇒ 只存原始用例元组。
 - 本目录第三份脚本从**文件名**推 unittest 模块名；上一轮的一次性版本写死了 `char_dsh_env`，
   换靶模块就会静默跑错对象 —— 这条改动是复算时才发现需要的，也是复算能跑通的前提。
+- **带连字符的件必须按文件路径加载**（`dsh-accept.py` / `dsh-fallback-heal.py` 这类命名很常见）。
+  补这条时踩到一个更贵的子坑：`_load("dsh_env", "dsh-env.py", byfile=True)` 若还先去试 `__import__("dsh_env")`，
+  会**成功导入另一个文件** `dsh_env.py` ⇒ 测的是甲、改的是乙，整个变异实验作废。故 `byfile` 时禁止回落到按名导入。
+- **"两遍都失败"不等于"两遍不一致"**：上一版这两种共用一个出口，结果我自己在子进程里少 `import io`（每次都 NameError）
+  被汇报成"该仓 27 个调用全部非确定"——**把仪器的故障说成被测物的性质**。现在分开记 `采集失败` 与 `非确定`，
+  修好后同一件从"0 收 27 丢"变成"27 收 0 丢"。凡见到"整批都是同一种坏"，先怀疑采集，再怀疑被测。

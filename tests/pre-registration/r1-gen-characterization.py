@@ -14,6 +14,33 @@ MOD = sys.argv[2]
 OUT = os.path.realpath(sys.argv[3])
 os.chdir(REPO); sys.path.insert(0, REPO)
 
+# ★ 模块名带连字符的仓很常见（本仓就有 dsh-plugins.py / dsh-accept.py），
+#   `import_module("dsh-env")` 直接失败。这类件只能按**文件路径**加载 —— 该仓自己的
+#   dsh_tests.py 也是用 importlib.util.spec_from_file_location 绕的。
+#   不给这条通路，特征测试就永远造不到这些件上 —— 而它们往往正是要改的那几个。
+MOD_FILE = MOD if MOD.endswith(".py") else (MOD + ".py")
+NEEDS_FILE_LOAD = ("-" in MOD_FILE)
+# 按文件加载时得给解释器一个合法的模块名；不带连字符的老用法保持原样（不改变既有读数的前置条件）
+MOD_NAME = MOD[:-3].replace("-", "_") if MOD.endswith(".py") else MOD.replace("-", "_")
+
+LOADER = '''
+import importlib.util as _ilu
+def _load(name, fname, byfile):
+    """按模块名导入；带连字符的件必须**按文件路径**加载。
+    ★ byfile 时绝不能再试 __import__：dsh-env.py 试 __import__("dsh_env") 会成功，
+      但导进来的是**另一个文件** dsh_env.py —— 那就成了"测甲改乙"，整个实验作废。"""
+    if not byfile:
+        try:
+            return __import__(name)
+        except Exception:
+            pass
+    import os
+    spec = _ilu.spec_from_file_location(name, os.path.join(os.getcwd(), fname))
+    m = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+'''
+
 STUB_SRC = '''
 import os, socket, subprocess, sys, time
 class SideEffect(Exception): pass
@@ -50,15 +77,15 @@ def stable(fn, args):
     #   在同一个进程里"按导入顺序挨个调一遍"会把前面调用的副作用带进后面的期望值里
     #   ——实测：那样录出来的 151 条里，跑第二遍时有 6 条对不上（状态污染 + 时间/pid 混入）。
     import subprocess as sp
-    code = ("import os,sys;sys.path.insert(0,os.getcwd());"
-            "exec(%r);"
-            "import importlib,io;M=importlib.import_module(%r);"
+    code = ("import os,sys,io;sys.path.insert(0,os.getcwd());"
+            "exec(%r);exec(%r);"
+            "M=_load(%r,%r,%r);"
             "fn=getattr(M,%r)\nargs=eval(%r)\nline=None\n"
             "buf=io.StringIO();old=sys.stdout;sys.stdout=buf\n"
             "try:\n    r=fn(*args);line='V'+repr(r)\n"
             "except BaseException as e:\n    line='R'+type(e).__name__\n"
             "finally:\n    sys.stdout=old\n"
-            "sys.__stdout__.write(line+chr(10))" % (STUB_SRC, MOD, fn.__name__, repr(list(args))))
+            "sys.__stdout__.write(line+chr(10))" % (STUB_SRC, LOADER, MOD_NAME, MOD_FILE, NEEDS_FILE_LOAD, fn.__name__, repr(list(args))))
     outs = []
     for _ in range(2):
         # ★ 用 subprocess.Popen（模块属性每次现查，桩装不进真正的类）——
@@ -72,9 +99,14 @@ def stable(fn, args):
         pick = [l for l in line if l[:1] in ("V", "R")]
         es = (p.stderr or "").strip().splitlines()
         outs.append(pick[-1] if pick else "E" + str(p.returncode) + "|" + (es[-1][:90] if es else "无 stderr"))
-    if outs[0] != outs[1] or outs[0][0] == "E":
-        return None
-    return ("value", outs[0][1:], "") if outs[0][0] == "V" else ("raises", outs[0][1:], "")
+    if outs[0][0] == "E":
+        # ★ 两遍都拿不到结果标记 = **采集失败**，不是被测对象非确定。上一版把这两种混成一格，
+        #   于是我 own 的一个 import 缺失（子进程 NameError）被汇报成"该仓 27 个调用全非确定"——
+        #   把仪器的故障说成被测物的性质，这是这类自测最贵的一种谎。
+        return ("failed", outs[0][:140])
+    if outs[0] != outs[1]:
+        return ("unstable", outs[0][:140])
+    return ("value", outs[0][1:]) if outs[0][0] == "V" else ("raises", outs[0][1:])
 
 def argsets(na):
     if na == 0:
@@ -82,10 +114,11 @@ def argsets(na):
     pool = [[0], [1], [-1], ["x"], [""], [True], [None], [[], [1]]]
     return [tuple(v * na) for v in pool[:6]]
 
-mod = __import__(MOD)
+exec(compile(LOADER, "<loader>", "exec"), globals())
+mod = _load(MOD_NAME, MOD_FILE, NEEDS_FILE_LOAD)
 keep, skip = [], []
 for name, fn in sorted(vars(mod).items()):
-    if name.startswith("_") or not inspect.isfunction(fn) or fn.__module__ != MOD:
+    if name.startswith("_") or not inspect.isfunction(fn) or fn.__module__ != MOD_NAME:
         continue
     try:
         sig = inspect.signature(fn)
@@ -95,10 +128,11 @@ for name, fn in sorted(vars(mod).items()):
     if na > 2:
         skip.append((name, "参数多于 2 个，本轮不构造对象")); continue
     for a in argsets(na):
-        r = stable(fn, list(a))
-        if r is None:
+        kind, val = stable(fn, list(a))
+        if kind == "failed":
+            skip.append((name + repr(a), "采集失败（子进程没交出结果标记）⇒ " + val)); continue
+        if kind == "unstable":
             skip.append((name + repr(a), "两遍不一致 ⇒ 非确定，丢弃")); continue
-        kind, val, printed = r
         if kind == "raises" and val in ("SideEffect", "SystemExit", "KeyboardInterrupt"):
             skip.append((name + repr(a), "被桩挡住 / 会退出进程")); continue
         keep.append((name, repr(a), kind, val))
@@ -110,7 +144,8 @@ with io.open(OUT, "w", encoding="utf-8", newline="\n") as fp:
     fp.write("import importlib, io, os, sys, unittest\n")
     fp.write(STUB_SRC)
     fp.write("sys.path.insert(0, os.getcwd())   # ★ 跟着当前目录走：变异探针在临时副本里跑\n")
-    fp.write("M = importlib.import_module(%r)\n" % MOD)
+    fp.write(LOADER)
+    fp.write("M = _load(%r, %r, %r)\n" % (MOD_NAME, MOD_FILE, NEEDS_FILE_LOAD))
     fp.write("CASES = %s\n" % repr(keep))
     fp.write('''
 class Characterization(unittest.TestCase):
