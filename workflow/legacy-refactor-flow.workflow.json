@@ -1,0 +1,150 @@
+{
+  "schema": "legacy-refactor-workflow/v1",
+  "name": "legacy-refactor-flow",
+  "version": "1.5",
+  "entrySkill": "../SKILL.md",
+  "runner": "workflow-run.ps1",
+  "description": "遗留系统重构五步流程的契约式工作流封装：阶段出口是可执行、可密封的门；跑不完只能出 partial/INCONCLUSIVE，不出「改好了」。",
+
+  "profiles": {
+    "gate": {
+      "id": "gate",
+      "purpose": "改一小步前的一次性闸门（快、不产报告）",
+      "phases": ["B", "D", "E", "T"],
+      "mutateCode": false,
+      "runTargetProject": true,
+      "budgetSec": 240,
+      "incompleteOutcome": "partial/INCONCLUSIVE"
+    },
+    "full": {
+      "id": "full",
+      "purpose": "接手一个仓的完整五步 + 强制拆除",
+      "phases": ["A", "B", "C", "D", "E", "T"],
+      "mutateCode": true,
+      "runTargetProject": true,
+      "budgetSec": 3600,
+      "incompleteOutcome": "partial/INCONCLUSIVE"
+    }
+  },
+
+  "inputs": {
+    "repoPath": { "required": true, "desc": "目标仓绝对路径" },
+    "testCmd": { "required": true, "desc": "跑裁判的命令，例：py -3 -X utf8 check.py / node --test all.test.js / make test" },
+    "profile": { "default": "full", "desc": "gate | full" },
+    "kitDir": { "default": "_refactor-kit", "desc": "目标仓内的好产物目录（SCOPE/分诊表留在这里）" },
+    "mutationTargets": { "default": "src", "desc": "裁判强度探针的采样目标" },
+    "maxMutants": { "default": 30, "desc": "变异名额上限；未采到的量在 coverage 里记 unknown，不当 resolved" },
+    "leaseTTLHours": { "default": 6, "desc": "钩子租约：过期后 -Collect 接管，不依赖发起方存活" },
+    "owner": { "default": "workflow", "desc": "写进台账的 owner 标记" }
+  },
+
+  "runArtifacts": {
+    "root": "~/.legacy-refactor-flow/runs/<projectId>/<runId>/",
+    "outsideTargetRepo": true,
+    "reason": "被检对象不该装自己的验收证据；跑一次不该让目标仓 git status 变脏",
+    "sealed": ["run-manifest.json", "gates.json", "coverage.json"],
+    "projection": ["report.md"],
+    "processReports": ["recon-report.md", "mutation-report.md"],
+    "inTargetRepo": ["_refactor-kit/SCOPE.md", "_refactor-kit/TRIAGE.csv"],
+    "placementRule": "机器生成的过程报告一律落 runDir；kitDir 只放**人写的**、本来就该进仓的产物（SCOPE/TRIAGE）。混放会让 -Sweep 的 [?] 变成噪声，而噪声会让人开始忽略门",
+    "seal": "seal.json",
+    "semantics": "seal 只证明本地三份语义文档未被改动，不是签名、不是发布者身份、不证明运行时加载过哪个版本；report.md 是人读投影，不入密封"
+  },
+
+  "phases": [
+    {
+      "id": "A", "name": "立界", "goal": "定义「改好了」，抓基线，留退路",
+      "steps": [
+        { "kind": "manual", "desc": "写 SCOPE.md：in-scope / read-only / DoD；打 v0-baseline 标签" }
+      ],
+      "gates": [
+        { "id": "A-g1", "op": "exists", "path": "{kitDir}/SCOPE.md", "desc": "SCOPE.md 已写" },
+        { "id": "A-g2", "op": "matches", "path": "{kitDir}/SCOPE.md", "pattern": "DoD|完成定义", "desc": "DoD 可判真假" },
+        { "id": "A-g3", "op": "cmd", "cmd": "git -C \"{repoPath}\" rev-parse HEAD", "desc": "是 git 仓，有退路" },
+        { "id": "A-g4", "op": "human", "desc": "用户确认 DoD 判的是行为，不是「代码变好看」" }
+      ],
+      "onFail": "stop"
+    },
+    {
+      "id": "B", "name": "测绘", "goal": "拿结构事实，不靠人读",
+      "steps": [
+        { "kind": "tool", "tool": "phase0-recon", "args": ["-RepoPath", "{repoPath}", "-OutFile", "{runDir}/recon-report.md"], "desc": "语言/体量/热力/测试设施/入口点" }
+      ],
+      "gates": [
+        { "id": "B-g1", "op": "nonempty", "path": "{runDir}/recon-report.md", "desc": "报告落盘且非空" },
+        { "id": "B-g2", "op": "matches", "path": "{runDir}/recon-report.md", "pattern": "统计来源：(scc|tokei|cloc|内置兜底)", "desc": "标了数据来源" },
+        { "id": "B-g3", "op": "matches", "path": "{runDir}/recon-report.md", "pattern": "\\[recon\\] TEST_INFRA=(config|structural|none)", "desc": "第 5 节给出机器可读的三态判定" },
+        { "id": "B-g4", "op": "notMatches", "path": "{runDir}/recon-report.md", "pattern": "(?ms)TEST_INFRA=(config|structural).*?这才叫从零开始", "desc": "同一份报告不许自相矛盾：识别到测试却宣称从零开始" },
+        { "id": "B-g5", "op": "matches", "path": "{runDir}/recon-report.md", "pattern": "入口点候选", "desc": "第 6 节存在，C 步才有输入" },
+        { "id": "B-g6", "op": "human", "desc": "人工对照：§5 说有测试时列出的确实是测试；说没有时仓里确实没有。机器只能查自相矛盾，查不了判据用错" }
+      ],
+      "onFail": "stop"
+    },
+    {
+      "id": "C", "name": "定活", "goal": "先减量——删掉不需要理解的代码是零风险最高回报的一步",
+      "steps": [
+        { "kind": "manual", "desc": "入口点逐个打 LIVE/DEAD/UNKNOWN，写 {kitDir}/TRIAGE.csv（表头含「观测窗口」）" }
+      ],
+      "gates": [
+        { "id": "C-g1", "op": "nonempty", "path": "{kitDir}/TRIAGE.csv", "desc": "分诊表非空" },
+        { "id": "C-g2", "op": "matches", "path": "{kitDir}/TRIAGE.csv", "pattern": "观测窗口", "desc": "DEAD 带观测窗口与触达画像，不是标签" },
+        { "id": "C-g3", "op": "human", "desc": "DEAD 的删除可撤回（留分支/留 flag），不是 rm" }
+      ],
+      "onFail": "stop"
+    },
+    {
+      "id": "D", "name": "造裁判", "goal": "造出变化探测器，并量出它有多强",
+      "steps": [
+        { "kind": "cmd", "cmd": "{testCmd}", "desc": "基线：裁判自己得先绿" },
+        { "kind": "tool", "tool": "mutation-probe", "args": ["-Repo", "{repoPath}", "-TestCmd", "{testCmd}", "-Targets", "{mutationTargets}", "-MaxMutants", "{maxMutants}", "-OutFile", "{runDir}/mutation-report.md"], "desc": "注变异看裁判会不会红" }
+      ],
+      "gates": [
+        { "id": "D-g1", "op": "nonempty", "path": "{runDir}/mutation-report.md", "desc": "强度报告落盘" },
+        { "id": "D-g2", "op": "matches", "path": "{runDir}/mutation-report.md", "pattern": "MUT score=", "desc": "有机器读数" },
+        { "id": "D-g3", "op": "notMatches", "path": "{runDir}/mutation-report.md", "pattern": "MUT score=0 ", "desc": "0 分且候选点非空 ⇒ 裁判基本无效，别进 E" },
+        { "id": "D-g4", "op": "human", "desc": "漏放清单逐条看过：哪些是等价变异体，哪些是真缺口" }
+      ],
+      "onFail": "stop"
+    },
+    {
+      "id": "E", "name": "小步改", "goal": "一个 PR 一个意图，每步都有探测器看着",
+      "steps": [
+        { "kind": "cmd", "cmd": "{testCmd}", "desc": "收尾前再跑一次" }
+      ],
+      "gates": [
+        { "id": "E-g1", "op": "cmd", "cmd": "{testCmd}", "desc": "测试仍绿" },
+        { "id": "E-g2", "op": "human", "desc": "每个 PR 单一意图；机械大改走 codemod" }
+      ],
+      "onFail": "stop"
+    },
+    {
+      "id": "T", "name": "拆除（不可跳过）", "goal": "不留任何持续性钩子，且由脚本证明",
+      "steps": [
+        { "kind": "tool", "tool": "hooks-ledger", "args": ["-Ledger", "{runDir}/hooks.json", "-Teardown"], "desc": "预演" },
+        { "kind": "tool", "tool": "hooks-ledger", "args": ["-Ledger", "{runDir}/hooks.json", "-Teardown", "-Apply"], "desc": "执行" },
+        { "kind": "tool", "tool": "hooks-ledger", "args": ["-Ledger", "{runDir}/hooks.json", "-Collect"], "desc": "清孤儿（租约过期而发起方未归）" }
+      ],
+      "gates": [
+        { "id": "T-g1", "op": "tool", "tool": "hooks-ledger", "args": ["-Ledger", "{runDir}/hooks.json", "-Verify"], "desc": "逐条核对，任一未清即非零" },
+        { "id": "T-g2", "op": "tool", "tool": "hooks-ledger", "args": ["-Ledger", "{runDir}/hooks.json", "-Sweep", "-Repo", "{repoPath}"], "desc": "独立扫描硬残留（HARD=0）；[?] 项不在这里判" },
+        { "id": "T-g3", "op": "human", "desc": "对 -Sweep 打印的每一类 [?]（含 git status 变更）逐项确认是用户要的；交付写明保留了什么、拆除了什么、验证输出是什么" }
+      ],
+      "onFail": "fail-closed"
+    }
+  ],
+
+  "coverageStates": {
+    "complete": "该阶段所有机器门通过且人工门已放行",
+    "partial": "有门未跑或名额被截断 ⇒ 全量断言禁止",
+    "unknown": "本轮没采到（如变异名额截断、-Targets 未覆盖的文件）⇒ 一律记 unknown，绝不自动算 resolved",
+    "failed": "跑过且不过"
+  },
+
+  "invariants": [
+    "A~D 期间一行业务代码都不改",
+    "任何持续性钩子在创建的同一刻登记，且带 owner/TTL",
+    "期望值一律来自真实运行；模型不许手写期望值",
+    "判不了的（daemon/crontab/用户级环境变量/端口/跨仓）必须在 coverage 里写未核，不许沉默当 0",
+    "任一门 partial/failed ⇒ 只能交付 partial/INCONCLUSIVE，不得声称改好了"
+  ]
+}

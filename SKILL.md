@@ -3,7 +3,7 @@ name: legacy-refactor-flow
 description: 遗留系统/屎山重构的通用流程，自带强制拆除。当用户说「重构这个屎山」「这项目没人懂也没测试」「遗留代码怎么安全改造」「legacy 怎么现代化」，或面对一个只知大致用途、缺少测试、可能是 AI 生成的代码库需要安全改造时使用。流程：立界→测绘→定活→造裁判→小步改；全过程把创建的持久化钩子登记入台账，收尾时强制拆除并脚本验证，保证不留任何跨会话残留。
 ---
 
-# 遗留系统重构通用流程 v1.4
+# 遗留系统重构通用流程 v1.5
 
 ## 0. 两条铁律
 
@@ -191,7 +191,32 @@ D 步用 `scripts/mutation-probe.ps1` 量裁判强度——它往代码里注入
 
 详见 `references/COMMUNITY-MAP.md`；完整操作手册见 `references/REFACTOR-RUNBOOK.md`。
 
-## 6. 结束前自检
+## 6. 两种交付形态：技能（默认）与工作流（可选，供用户选）
+
+同一套 A→B→C→D→E→拆除，两种强制力。用户说"用工作流跑""你们支持复杂工作流的那种"时才切第二种。
+
+| | 技能形态 | 工作流形态 |
+|---|---|---|
+| 出口由谁判 | 你按本文自检 | `workflow/workflow-run.ps1` 判 22 条门（16 机器 + 6 人工） |
+| 证据 | 你的汇报 | 密封三份语义文档，`-VerifySeal` 可验事后篡改 |
+| 跑不完 | 容易写成"基本完成" | 只能出 `partial/INCONCLUSIVE`（rc=3） |
+
+```powershell
+# 全六阶段（先跑一遍看停在哪；人工门要用户本人点头才写进 -Confirm）
+powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath <目标仓> -TestCmd "<该仓跑测试的命令>"
+powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath <目标仓> -TestCmd "<同上>" -Confirm A,B,C,D,E,T
+# 改一小步的轻量档（B/D/E/T，默认从 B 起跑）
+powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath <目标仓> -TestCmd "<同上>" -Profile gate -Confirm B,D,E,T
+```
+
+**按退出码说话，措辞受限**：`0` 才可按 DoD 交付；`1` 必须贴出失败那条门的 `detail`（含输出尾部）；
+`3` 只能说"跑到哪、还差哪个人工确认"；`2` 是清单缺失/用法错，属安装故障，**不许绕过去手工模拟门**。
+`-Confirm` 里的字母**只能来自用户本人的放行**，不许自批，也不许把"我判断用户会同意"写成放行。
+
+产物一律落 `~/.legacy-refactor-flow/runs/…`（被检仓之外）。契约、限度、未实现字段的声明见 `workflow/contract.md`；
+接入平台的步骤见 `workflow/IMPORT.md`；斜杠命令入口在 `commands/`（full / gate / status）。
+
+## 7. 结束前自检
 
 1. `hooks-ledger -Verify` 是不是全绿？`-Sweep` 是不是 `HARD=0`？
 2. 目标仓库 `git status` 里剩下的，是不是都是用户要的成果物？

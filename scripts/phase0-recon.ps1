@@ -272,6 +272,11 @@ $L.Add($dupNote)
 $L.Add("")
 $L.Add("## 5. 测试基础设施现状")
 $L.Add("")
+# 机器可读的三态判定放在正文**之前**：门要用 `TEST_INFRA=(config|structural).*?这才叫从零开始`
+# 这种顺序敏感的判据抓"同一份报告自相矛盾"，行序反了它就抓不到。
+$L.Add("[recon] TEST_INFRA=" + $(if ($infra.Count -gt 0) { 'config' } elseif ($test.Count -gt 0) { 'structural' } else { 'none' }) +
+       " configs=" + $infra.Count + " structural=" + $test.Count)
+$L.Add("")
 if ($infra.Count -gt 0) {
     $L.Add("命中配置文件：" + ($infra -join ", "))
     if ($test.Count -gt 0) { $L.Add("另外按命名/结构识别出 " + $test.Count + " 个测试文件。") }
@@ -287,6 +292,8 @@ if ($infra.Count -gt 0) {
 }
 $L.Add("")
 $L.Add("## 6. 入口点候选")
+$L.Add("")
+$L.Add("[recon] ENTRY_POINTS=" + $entries.Count + " truncated=" + $(if ($guardTrunc) { 'true' } else { 'false' }))
 $L.Add("")
 if ($entries.Count -gt 0) {
     $L.Add("共 " + $entries.Count + " 个（判据：名字白名单 / 仓根批处理 / shebang / ``__main__`` 守卫）")
@@ -323,7 +330,9 @@ $L.Add("4. 用 " + $tick + "RefactoringMiner" + $tick + " 挖这个仓库历史�
 $L.Add("")
 
 $target = $OutFile
-if (-not [System.IO.Path]::IsPathRooted($OutFile)) { $target = Join-Path (Get-Location).Path $OutFile }
+# 相对 -OutFile 锚在**被扫的仓**上，不锚在调用方的 CWD：调用方（工作流执行器）在别处时，
+# 锚 CWD 会把报告写到别人家里去（实测踩过：父目录不存在 ⇒ 静默 rc=1，门只看到"文件不存在"）。
+if (-not [System.IO.Path]::IsPathRooted($OutFile)) { $target = Join-Path $root $OutFile }
 Set-Content -LiteralPath $target -Value ($L -join $nl) -Encoding UTF8
 Write-Host "[recon] 报告已写入 $target"
 Write-Host "[recon] 概要：$statSource / $($code.Count) 文件 / $totalLines 行 / 测试占比 $pct%"

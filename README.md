@@ -31,6 +31,27 @@ A 立界 → B 测绘 → C 定活 → D 造裁判 → E 小步改
 A~D 是纯投入期，**一行业务代码都不改**。跳过 D 直接进 E，等于在没有探测器的情况下改代码——
 下面提到的 39.4% 是**模型在基准上的成绩**，不是"跳过裁判会砸多少"的测量，只能当类比用。
 
+## 两种形态：按同一套流程，选一种强制力
+
+| | 技能形态（默认） | **工作流形态**（可选） |
+|---|---|---|
+| 载体 | `SKILL.md` 的文字 + `scripts/` 三个脚本 | `workflow/` 的清单 + 前台执行器 + `commands/` 三条入口 |
+| 谁判"这步做完了" | 读的 agent 自己 | 22 条门（16 条机器判 + 6 条必须真人点头），过不去就停 |
+| 证据 | agent 的汇报 | 密封三份语义文档（`-VerifySeal` 能验出事后篡改） |
+| 没跑完时 | 容易写成"基本完成" | 只能出 `partial/INCONCLUSIVE`，退出码 3 |
+| 适合 | 任何 agent 平台 | 支持复杂工作流/按 rc 分支的平台（zcode 这类） |
+
+```powershell
+# 一次跑完六个阶段（人工门要用户点头，之后补 -Confirm 重跑）
+powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath D:\path\to\repo -TestCmd "node --test tests/"
+powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath D:\path\to\repo -TestCmd "node --test tests/" -Confirm A,B,C,D,E,T
+# 事后核对密封 / 读某次 run
+powershell -NoProfile -File workflow/workflow-run.ps1 -VerifySeal -RunDir <产物目录>
+```
+
+产物落在**被检仓之外**（`~/.legacy-refactor-flow/runs/<projectId>/<runId>/`），跑完目标仓 `git status` 仍干净。
+契约与限度见 `workflow/contract.md`（含"清单声明了但执行器暂未执行"那一节），接进平台的步骤见 `workflow/IMPORT.md`。
+
 ## 快速开始
 
 ```powershell
@@ -129,6 +150,35 @@ pwsh -NoProfile -File tests/run-all.ps1           # 也可以；但在 Windows �
 `.gitattributes` 里的 `*.ps1 text eol=crlf` **只管换行符，不管编码**，管不住第一行那条。
 
 ## 变更记录
+
+### v1.5（2026-09-28）—— 同一套流程包成"可执行门 + 密封产物"的工作流形态，供用户选
+
+新增 `workflow/`（清单 `legacy-refactor-flow.workflow.json`、前台执行器 `workflow-run.ps1`、契约 `contract.md`、
+接入说明 `IMPORT.md`）与 `commands/`（full / gate / status 三条斜杠入口）。技能形态不变，工作流形态是**可选的第二层强制力**：
+22 条门（16 机器判 + 6 必须真人放行），三份语义文档入 SHA-256 密封，跑不完只能出 `partial/INCONCLUSIVE`。
+
+七处缺陷全部是**这份工作流自己把我原来的假设打脸**打出来的，不是设计评审发现的：
+
+| # | 症状 | 根因 | 修法（+ 逮住它的断言） |
+|---|---|---|---|
+| 1 | 全确认重跑仍出 rc=3，人工门一个都没落账 | `-File` 调用时 `-Confirm A,B,C,D,E,T` 作为 **argv 的一项**传入，PowerShell 不按逗号切数组 ⇒ `$Confirm -contains 'A'` 恒假 | 执行器统一按逗号再切一刀；W1/W2 一对（不确认必须 3、确认必须 0） |
+| 2 | B 阶段报"文件不存在"，`phase0-recon` 其实 rc=1 | 子进程继承**技能仓** CWD，相对 `-OutFile` 落到技能仓一个不存在的父目录 | 执行器把子进程工作目录固定为目标仓；`phase0-recon` 的相对 `-OutFile` 锚在**被扫仓**；W0b/W0d（技能仓不收产物、跑完 `git status` 干净） |
+| 3 | 拆除档在正常仓里永远过不去：`HARD=0` 却 rc=1 | `-Sweep -Strict` 让机器替人回答 `[?] git status 有 1 项变更`——而"是不是用户自己要的成果物"只有用户知道 | 机器门只判 `HARD=0`，`[?]` 逐项确认移到人工门 T-g3（照 mimosa 那条"机器判覆盖、人判声明"的分界） |
+| 4 | 门本身会说谎：`notMatches 两路都没命中` 既误伤第 6 节同措串行，又**禁止"仓里真没测试"这一合法分支** | 整篇扫一个人类措辞，等于把语义判断伪装成机器判据 | 工具加机器可读三态 `[recon] TEST_INFRA=config\|structural\|none`（放正文之前，顺序是判据的一部分）；门改查"同一份报告自相矛盾"；语义对照写进 B-g6 人工门。W9 拿**清单里实际发布的 pattern** 打说谎/诚实两种形状，证明这门能开也能不开 |
+| 5 | `-Profile gate` 开箱即 rc=2 | `-FromPhase` 写死 `A`，而 gate 档的阶段表里没有 A | 默认取本档第一个阶段；W8/W8b 跑轻量档实链与 dry-run |
+| 6 | 输出行长成 `[wf] run C:\… + ` | `Write-Host "a" + $b` 里 `+` 被当**参数**原样打印（与 v1.4 那处同类，我又踩了一遍） | 整体插值后输出 |
+| 7 | 步骤只记 rc、丢掉输出 ⇒ 失败无因可查 | 捕获了 `$r.out` 却没落盘 | `gates.json` 每条步骤带 `detail`（输出尾部）；W0c 断言其非空 |
+
+另有两处是**测试夹具自己坏掉**：`"$((…) | ConvertFrom-Json).repo)"` 取不到成员、把整个对象印成字符串，
+判据恒不命中 ⇒ 收尾把自家 run 全认成"别人的"留下残渣；以及数组实参写成 `Join-Path $root $kit, (…)`
+被逗号抢绑定。现在收尾按"`开工前快照 + `run-manifest.json` 的 `repo` 指向本次沙箱"认亲，
+**只删自己造的**，判据不成立的目录一行都不碰。
+
+契约里单列一节"**清单声明了但执行器暂未执行的字段**"（`onFail` / `budgetSec` / `mutateCode` / `incompleteOutcome` / `-Owner` 未下传）——
+声明而不执行的字段会让清单变成装饰，所以点名写出来，不藏。
+
+自检扩到 **41 + 17 + 13 + 17 项**（最后一项是 `check-workflow`，跑完自己会打总数），`run-all.ps1` 由四项变五项，
+且总数从清单长度算（往数组加一项而文案仍写"4 / 4"是一种假绿）。
 
 ### v1.4（2026-09-28）—— 拿真仓当靶子打，暴露四处：报告说谎、抽样被当全仓
 
