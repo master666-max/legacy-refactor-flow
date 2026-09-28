@@ -49,12 +49,13 @@ function Probe($repoArg, $testCmd, $targets, $maxM, $outF) {
         $txt = & $sh ($shArgs + [string[]]$call) 2>&1 | Out-String
         $rc = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prev }
-    $o = [pscustomobject]@{ rc = $rc; score = -1.0; killed = -1; total = -1; avail = -1; uncov = -1; miss = -1; txt = $txt }
+    $o = [pscustomobject]@{ rc = $rc; score = -1.0; killed = -1; total = -1; avail = -1; uncov = -1; miss = -1; tempNew = -1; txt = $txt }
     if ($txt -match 'MUT score=([0-9.]+) killed=(\d+) total=(\d+)') {
         $o.score = [double]$matches[1]; $o.killed = [int]$matches[2]; $o.total = [int]$matches[3]
     }
     if ($txt -match 'avail=(\d+) uncov=(\d+)') { $o.avail = [int]$matches[1]; $o.uncov = [int]$matches[2] }
     if ($txt -match 'missing-targets=(\d+)') { $o.miss = [int]$matches[1] }
+    if ($txt -match 'temp-new=(\d+)') { $o.tempNew = [int]$matches[1] }
     return $o
 }
 
@@ -190,6 +191,19 @@ sys.exit(1 if bad else 0)
     $dot = Probe $repo "node --test strong/all.test.js" "."
     Chk 'M12 整仓目标能采到候选点' ($dot.avail -ge 9 -and $dot.rc -eq 0 -and $dot.miss -eq 0) "avail=$($dot.avail)（夹具真码 9 个变异点起）rc=$($dot.rc) missing=$($dot.miss)"
 
+    # M13：跑裁判的代价必须量得出来。靶仓自带的测试常往本机 TEMP 写件（真仓 dsh_tests.py 每个用例
+    # mkdtemp 不删），而探针要把这条测试命令**重跑 N+1 遍** ⇒ 探针得报 temp-new，
+    # 且不许把自己的工作副本（lrf-*）算进去。反向证人 M13b：不写 TEMP 的夹具必须报 0。
+    # 造代价的脚本放在 $repo **之外**：否则 -Targets . 的那一轮会把它当变异点。
+    $costTag = 'mutchk-cost-' + (Split-Path -Leaf $sb)
+    $costDir = Join-Path ([System.IO.Path]::GetTempPath()) $costTag
+    $costTool = Join-Path $sb 'cost-tool\mkcost.js'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $costTool) | Out-Null
+    [System.IO.File]::WriteAllText($costTool, ("const fs=require('fs'),os=require('os');fs.mkdirSync(os.tmpdir()+'/" + $costTag + "',{recursive:true});process.exit(0);"), (New-Object System.Text.UTF8Encoding($false)))
+    $cost = Probe $repo ("node --test strong/all.test.js && node " + $costTool) "src"
+    Chk 'M13 测试命令往 TEMP 写件要报代价' ($cost.tempNew -ge 1 -and (Test-Path -LiteralPath $costDir)) "temp-new=$($cost.tempNew) 目录真在=$([bool](Test-Path -LiteralPath $costDir))"
+    Chk 'M13b 不写 TEMP 的夹具必须报 0' ($strong.tempNew -eq 0) "强集那轮 temp-new=$($strong.tempNew)（探针自己的 lrf-* 已排除）"
+
     # 工作副本用完必须删（探针自己清干净）。不用 -Filter：Windows 的 8.3 短名会让
     # "lrf-mut-*" 匹配到意料之外的东西；直接按名字正则取探针工作副本（时间戳开头是数字）。
     $left = @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -ErrorAction SilentlyContinue |
@@ -209,6 +223,8 @@ sys.exit(1 if bad else 0)
 } finally {
     if ($KeepSandbox) { Write-Host "[mutation] 沙箱留着：$sb" }
     elseif (Test-Path -LiteralPath $sb) { Remove-Item -LiteralPath $sb -Recurse -Force }
+    # M13 造的代价目录是本夹具自己写的，不是探针工作副本 —— 沙箱删不掉它，得单独收
+    if ($costDir -and (Test-Path -LiteralPath $costDir)) { Remove-Item -LiteralPath $costDir -Recurse -Force }
 }
 Write-Host ""
 if ($bad -gt 0) { Write-Host "[mutation] 失败 $bad 项 / 通过 $pass 项 / SKIP $skip"; exit 1 }

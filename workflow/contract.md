@@ -52,6 +52,11 @@ DSL 七种判据：`exists` / `nonempty` / `matches` / `notMatches` / `cmd` / `t
 daemon / crontab / 用户级环境变量 / 常驻端口 / 跨仓写入 —— 全部进 `notChecked` 或 `unknown`，
 绝不因为"没报问题"就当通过。D 阶段的 score 在采不满时**是抽样分**，coverage 里写明白。
 
+还有一条同类：**跑裁判的代价**。测试命令是靶仓自带的，探针会把它重跑 N+1 遍，
+它想往哪儿写就往哪儿写（实测往本机 TEMP 写了 167 个不删的空目录）。
+探针量出 `temp-new=N`（排除仪器自己的 `lrf-*`），N>0 ⇒ 执行器记一条 unknown：
+本机 TEMP 不在写入域登记的视野里，这些件算未清，不许念成"拆干净了"。
+
 ## 5. 密封的语义与限度
 
 `seal.json` = 三份语义文档的 SHA-256。核对：`-VerifySeal -RunDir <目录>`，不匹配 ⇒ rc=1。

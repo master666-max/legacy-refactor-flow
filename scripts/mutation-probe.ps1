@@ -10,6 +10,12 @@
   安全线：全程在 %TEMP% 的副本里做，**一行业务代码都不会被真改**；跑完删副本。
   基线红就拒跑：测试本来就是红的，任何"变异被抓住"都是假信号。
 
+  ★ 但"副本里做"只管得住**探针自己**的写。测试命令是靶仓自带的，它想往哪儿写就往哪儿写：
+    真仓实测（2026-09-28, dsh-launcher）dsh_tests.py 每个用例 tempfile.mkdtemp 不删，
+    探针逐变异体重跑 19 遍 ⇒ 本机 TEMP 多了一百多个空目录。所以本件量 baseline 前后 TEMP 的
+    **新增条目**并报成 `temp-new=N`（探针自己的 lrf-* 副本不计入）。N>0 不是失败，是代价：
+    拆除阶段的台账看不见本机 TEMP，这些件得人工清或让靶仓测试自己回收。
+
   退出码：0 = 量到了（哪怕得分很低）；2 = 基线红/超时，拒跑；3 = **一个候选点都没采到**
   （目标不存在或指错地方）——报告仍会写，但这个 0 不是"裁判强"，不许上游当成功。
 
@@ -152,6 +158,15 @@ function Run-Tests([string]$dir) {
 }
 
 # ---------- 2. 基线（红就拒跑） ----------
+# 顺手量"跑裁判的代价"：靶仓自带的测试可能往机器上写件，而探针会把这条测试命令**重跑 N+1 遍**。
+# 真仓实测（2026-09-28, dsh-launcher）：dsh_tests.py 每个用例 tempfile.mkdtemp 不删，
+# 本轮逐变异体重跑 ⇒ TEMP 里新增 167 个空目录，而拆除阶段对本机 TEMP 一无所知。
+function Temp-Snap {
+    $t = [System.IO.Path]::GetTempPath()
+    try { @([System.IO.Directory]::GetFileSystemEntries($t)) } catch { @() }
+}
+$hashset = @{}
+foreach ($e in (Temp-Snap)) { $hashset[$e] = $true }
 $base = Run-Tests $work
 if ($base.timedOut -or -not $base.ok -or $base.rc -ne 0) {
     $why = "红（rc=$($base.rc)）"
@@ -277,12 +292,30 @@ foreach ($mu in $mutants) {
 $evaluated = $killed + $survived.Count
 $score = 0
 if ($evaluated -gt 0) { $score = [math]::Round($killed / $evaluated, 3) }
+
+# 跑裁判的代价：只数**新增**且**不是仪器自己的**件（lrf-* 前缀是探针工作副本与自检沙箱，
+# 把它们算进去就等于拿仪器当被测物 —— 每次都自己填这个计数）。
+$probeOwn = 0
+$newNames = New-Object System.Collections.Generic.List[string]
+foreach ($e in (Temp-Snap)) {
+    if ($hashset.ContainsKey($e)) { continue }
+    $nm = [System.IO.Path]::GetFileName($e)
+    if ($nm -like 'lrf-*') { $probeOwn++; continue }
+    $newNames.Add($nm)
+}
+$tempNew = $newNames.Count
+if ($tempNew -gt 0) {
+    Write-Host ("[mut] COST temp-new=$tempNew（跑测试命令在 TEMP 新留下的非探针件；已排除探针自己的 $probeOwn 个）")
+    foreach ($s in @($newNames | Select-Object -First 5)) { Write-Host ("        + " + $s) }
+}
+
 $L = New-Object System.Collections.Generic.List[string]
 $L.Add("# 裁判强度探针报告")
 $L.Add("")
 $L.Add("- 生成时间：" + (Get-Date -Format 'yyyy-MM-dd HH:mm'))
 $L.Add("- 目标仓：``$root``")
 $L.Add("- 测试命令：``$TestCmd``")
+$L.Add("- **跑裁判的代价**：本轮在 TEMP 新留下 ``$tempNew`` 个**非探针产物**（是靶仓自带测试自己写的）⇒ 拆除阶段看不见本机 TEMP，这些得人工清或让靶仓测试自己回收")
 $L.Add("- **变异来源：内置文本级兜底**（未驱动 Stryker/mutmut/cargo-mutants）")
 $L.Add("- 变异点 $($mutants.Count) 个（判了 $evaluated 个）：抓住 $killed，漏放 $($survived.Count)，无法判定 $undecided —— **得分 $score**")
 $L.Add("- 候选点合计 $totalAvail 个 / $($avail.Count) 个文件；本轮只取 $($mutants.Count) 个，剩余 $missedPts 个未进本轮")
@@ -331,7 +364,7 @@ $L.Add("- **触达率未知**：变异点若落在根本没被任何测试执行
 $L.Add("- 装了 Stryker / mutmut / cargo-mutants / PIT 的，请按其原生配置再跑一遍并把得分并进来：")
 $L.Add("  ``npx stryker run`` ／ ``mutmut run`` + ``mutmut junitxml`` ／ ``cargo mutants``")
 $L.Add("")
-$machine = "[mut] MUT score=$score killed=$killed total=$evaluated probed=$($mutants.Count) avail=$totalAvail uncov=$missedPts zero-files=$($zeroFiles.Count) undecided=$undecided missing-targets=$($missing.Count) baseline=green source=builtin-textual"
+$machine = "[mut] MUT score=$score killed=$killed total=$evaluated probed=$($mutants.Count) avail=$totalAvail uncov=$missedPts zero-files=$($zeroFiles.Count) undecided=$undecided missing-targets=$($missing.Count) temp-new=$tempNew baseline=green source=builtin-textual"
 $L.Add("## 3. 机器读数")
 $L.Add("")
 $L.Add('```')

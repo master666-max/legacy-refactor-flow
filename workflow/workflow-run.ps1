@@ -272,6 +272,12 @@ foreach ($ph in $mf.phases) {
                 $sc = $matches[1]; $av = [int]$matches[4]; $uc = [int]$matches[5]
                 $dNote = "score=$sc（$av 个候选点里采到 $($av - $uc)）"
                 if ($uc -gt 0) { $unknown.Add("裁判强度：$uc 个候选点本轮未采到 ⇒ score=$sc 是**抽样分**，不代表全仓") }
+                # 跑裁判的代价：测试命令是靶仓自己的，它可能往本机 TEMP 写件，而探针会重跑它 N+1 遍。
+                # 拆除阶段只看登记过的写入域 ⇒ 这类件必须记 unknown，不许当"已拆干净"。
+                if ($mt -match 'temp-new=(\d+)') {
+                    $tn = [int]$matches[1]
+                    if ($tn -gt 0) { $unknown.Add("跑裁判的代价：测试命令在 TEMP 新留 $tn 个非探针件 ⇒ 本机 TEMP 不在拆除阶段的视野里，算未清") }
+                }
             } else { $unknown.Add('裁判强度报告里没有 MUT 机器读数行 —— 读数缺失，别引用它的分') }
         }
     }

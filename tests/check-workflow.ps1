@@ -214,6 +214,26 @@ test('边界', () => { t.equal(c.adult(18), true); t.equal(c.adult(17), false); 
     Chk 'W12 界挑了守不住的件要停在 A-g4' ($r12.rc -eq 1 -and $r12.out -match 'A-g4') "rc=$($r12.rc)"
     W '_refactor-kit/SCOPE.md' ("# SCOPE`r`n`r`n" + '[scope] IN_SCOPE=src/calc.js' + "`r`n`r`n## DoD（完成定义）`r`n- 重构后 38 用例仍绿且行为差异全部登记`r`n")
 
+    # W13 跑裁判的代价必须落进 coverage 的 unknown：测试命令往本机 TEMP 写件时，
+    #     D 段不许把"全门通过"念成"什么都没留下"。代价脚本放在被检仓**之外**，
+    #     否则清单默认的 -Targets . 会把它当变异点扫。
+    #     ★ 每次调用必须建**新名**目录：工作流在探针之前自己就跑过一遍测试命令，
+    #       固定名的话探针开机时它已经在 ⇒ 报 temp-new=0（真话，但证不到东西）。
+    $costTag = 'wfchk-cost-' + (Split-Path -Leaf $sb)
+    $costTool = Join-Path $sb 'cost-tool\mkcost.js'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $costTool) | Out-Null
+    [System.IO.File]::WriteAllText($costTool, ("const fs=require('fs'),os=require('os');fs.mkdirSync(os.tmpdir()+'/" + $costTag + "-'+process.pid+'-'+Date.now());process.exit(0);"), (New-Object System.Text.UTF8Encoding($false)))
+    $b13 = @('-RepoPath', $repo, '-TestCmd', ("node --test strong/all.test.js && node " + $costTool), '-MaxMutants', '12')
+    $r13 = Run ($b13 + @('-Confirm', 'A,B,C,D,E,T'))
+    $run13 = [regex]::Match($r13.out, '\[wf\] run\s+(\S+)').Groups[1].Value
+    $unk13 = ''
+    if ($run13 -and (Test-Path -LiteralPath (Join-Path $run13 'coverage.json'))) {
+        $c13 = [System.IO.File]::ReadAllText((Join-Path $run13 'coverage.json'), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        $unk13 = (@($c13.unknown) -join ' | ')
+    }
+    $costMade = @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter ($costTag + '*') -ErrorAction SilentlyContinue)
+    Chk 'W13 跑裁判的代价要记进 unknown' ($unk13 -match '跑裁判的代价' -and $costMade.Count -ge 1) ("rc=$($r13.rc) 代价目录 $($costMade.Count) 个；unknown 里$(if($unk13 -match '跑裁判的代价'){'有'}else{'没有'})代价条")
+
     # W5 缺 SCOPE.md ⇒ 停在 A 阶段，非零退出
     Remove-Item -LiteralPath (Join-Path $repo '_refactor-kit\SCOPE.md') -Force
     $r5 = Run ($base + @('-Confirm', 'A'))
@@ -257,6 +277,10 @@ test('边界', () => { t.equal(c.adult(18), true); t.equal(c.adult(17), false); 
         }
         foreach ($rd in $madeRuns) { if (($mine -notcontains $rd) -and (Test-Path -LiteralPath $rd)) { $mine += $rd } }
         if (Test-Path -LiteralPath $sb) { Remove-Item -LiteralPath $sb -Recurse -Force }
+        # W13 造的代价目录在被检仓之外（本机 TEMP），沙箱删不到它 —— 本夹具自己写的，自己收
+        foreach ($cd in @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Directory -Filter 'wfchk-cost-*' -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $cd.FullName -Recurse -Force
+        }
         foreach ($rd in $mine) {
             if (-not (Test-Path -LiteralPath $rd)) { continue }
             Remove-Item -LiteralPath $rd -Recurse -Force
