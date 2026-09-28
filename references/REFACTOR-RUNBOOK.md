@@ -51,6 +51,40 @@ git log --oneline -20                 # 有没有历史、有没有 AI 批量提
 git tag v0-baseline                   # 打一个不可变的起点，任何实验都能回滚
 ```
 
+**0.2 挑 in-scope 之前，先问"这个件有没有可测面"** —— 2026-09-28 真仓实测：按行数挑的两个小件根本守不住，
+`dsh-env.py` 顶层函数 **0 个**（只是转调 + main 守卫），`dsh-accept.py` 有 **29 条顶层可执行语句**（一 `import` 就执行自己）。
+前者录不出任何期望值，后者连"导入被测件"这一步都过不去。**小 ≠ 可守。**
+
+一次算清三个数，再决定动谁（纯静态，不执行被测代码）：
+
+```python
+import ast, io, os
+for f in sorted(os.listdir('.')):
+    if not f.endswith('.py'): continue
+    t = ast.parse(io.open(f, encoding='utf-8').read())
+    fs  = [n.name for n in t.body if isinstance(n, ast.FunctionDef)]          # 顶层函数：能不能逐条录期望值
+    top = len([n for n in t.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef,
+                     ast.Import, ast.ImportFrom, ast.Assign))])                 # 顶层可执行语句：导入即执行 = 不可守
+    g   = any('__main__' in ast.dump(n) for n in t.body)
+    print('%-24s 函数=%-3d 顶层可执行=%-3d main守卫=%s' % (f, len(fs), top, g))
+```
+
+判据（写进 `SCOPE.md`）：**函数数 > 0 且 顶层可执行语句少 且有 `__main__` 守卫** 才准入 in-scope。
+三条里任一条不满足，就只能走"进程级对照"（跑一次记 stdout/rc 当基线），别声称"造了裁判"。
+
+**0.3 多套裁判要并和，且并和本身要能证伪**。同仓同件同 18 个破坏点（全覆盖，非抽样）的实测：
+
+| 裁判 | 变异得分 |
+|---|---|
+| 该仓自带 38 用例 | **0.000**（一个都没看见） |
+| AI 逐调用自造的 27 条特征测试 | **0.056**（看见 1 个） |
+| **两套合用** | **0.111**（看见 2 个） |
+
+⇒ 两个弱裁判合起来**超过各自**——各抓到对方看不见的那个。所以"只跑一套绿的"不叫有裁判。
+合用时用**一个不含任何期望值的驱动件**把它们串成一条 `-TestCmd`（`python a.py && python b.py` 这种链在 cmd 下会被路径/重定向咬断）；
+驱动件必须：① 打出每套的**用例数**与 rc（`[judges] 该仓自带=38例/rc=0 自造=27例/rc=0 overall_rc=0`）；
+② **抓不到用例数就自己判失败**——`NO TESTS RAN` 配 rc=0 是最阴的一种假绿；③ 一行期望值都不许写，否则它就是第二个被测物。
+
 写 `SCOPE.md`，只填四项：
 
 ```markdown
