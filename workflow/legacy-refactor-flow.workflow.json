@@ -61,7 +61,8 @@
         { "id": "A-g1", "op": "exists", "path": "{kitDir}/SCOPE.md", "desc": "SCOPE.md 已写" },
         { "id": "A-g2", "op": "matches", "path": "{kitDir}/SCOPE.md", "pattern": "DoD|完成定义", "desc": "DoD 可判真假" },
         { "id": "A-g3", "op": "cmd", "cmd": "git -C \"{repoPath}\" rev-parse HEAD", "desc": "是 git 仓，有退路" },
-        { "id": "A-g4", "op": "human", "desc": "用户确认 DoD 判的是行为，不是「代码变好看」" }
+        { "id": "A-g4", "op": "tool", "tool": "testability-scan", "args": ["-Scope", "{kitDir}/SCOPE.md"], "desc": "in-scope 挑的不是守不住的件（顶层函数>0，且不是「导入即执行自身」）" },
+        { "id": "A-g5", "op": "human", "desc": "用户确认 DoD 判的是行为，不是「代码变好看」" }
       ],
       "onFail": "stop"
     },

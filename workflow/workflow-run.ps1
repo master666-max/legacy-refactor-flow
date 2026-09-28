@@ -117,9 +117,10 @@ if (-not $DryRun) { New-Item -ItemType Directory -Force -Path $runDirOut | Out-N
 if (-not $LeaseTTLHours -and $mf.inputs.leaseTTLHours) { $LeaseTTLHours = [int]$mf.inputs.leaseTTLHours.default }
 
 $tools = [ordered]@{
-    'phase0-recon'   = (Join-Path $skillRoot "scripts\phase0-recon.ps1")
-    'mutation-probe' = (Join-Path $skillRoot "scripts\mutation-probe.ps1")
-    'hooks-ledger'   = (Join-Path $skillRoot "scripts\hooks-ledger.ps1")
+    'phase0-recon'      = (Join-Path $skillRoot "scripts\phase0-recon.ps1")
+    'mutation-probe'    = (Join-Path $skillRoot "scripts\mutation-probe.ps1")
+    'hooks-ledger'      = (Join-Path $skillRoot "scripts\hooks-ledger.ps1")
+    'testability-scan'  = (Join-Path $skillRoot "scripts\testability-scan.ps1")
 }
 function Sub([string]$s) {
     if (-not $s) { return $s }

@@ -197,7 +197,7 @@ D 步用 `scripts/mutation-probe.ps1` 量裁判强度——它往代码里注入
 
 | | 技能形态 | 工作流形态 |
 |---|---|---|
-| 出口由谁判 | 你按本文自检 | `workflow/workflow-run.ps1` 判 22 条门（16 机器 + 6 人工） |
+| 出口由谁判 | 你按本文自检 | `workflow/workflow-run.ps1` 判 23 条门（17 机器 + 6 人工） |
 | 证据 | 你的汇报 | 密封三份语义文档，`-VerifySeal` 可验事后篡改 |
 | 跑不完 | 容易写成"基本完成" | 只能出 `partial/INCONCLUSIVE`（rc=3） |
 
@@ -216,7 +216,7 @@ powershell -NoProfile -File workflow/workflow-run.ps1 -RepoPath <目标仓> -Tes
 ### 6.1 第三种入口：宿主的动态工作流壳（本机未执行过一次，别当能力宣传）
 
 `workflow/qoder-cli/legacy-refactor.js` 放在项目的 `.qoder/workflows/` 下，让支持动态工作流的宿主按名字派工。
-它**只派工、不判门**：六个阶段各派一个子 agent 去跑上面那个执行器的一段并把 rc 与证据带回，22 道门一条也没有因为这层壳变强。
+它**只派工、不判门**：六个阶段各派一个子 agent 去跑上面那个执行器的一段并把 rc 与证据带回，23 道门一条也没有因为这层壳变强。
 
 本机 `qodercli` 1.1.64 实测（2026-09-28，命令与回执逐条记在该文件头）：
 

@@ -61,7 +61,7 @@ try {
     $shArgs = if ($env:OS -eq 'Windows_NT') { @('-NoProfile','-ExecutionPolicy','Bypass','-File') } else { @('-NoProfile','-File') }
 
     New-Item -ItemType Directory -Force -Path $repo | Out-Null
-    W '_refactor-kit/SCOPE.md' "# SCOPE`r`n`r`n## DoD（完成定义）`r`n- 重构后 38 用例仍绿且行为差异全部登记`r`n"
+    W '_refactor-kit/SCOPE.md' ("# SCOPE`r`n`r`n" + '[scope] IN_SCOPE=src/calc.js' + "`r`n`r`n## DoD（完成定义）`r`n- 重构后 38 用例仍绿且行为差异全部登记`r`n")
     W '_refactor-kit/TRIAGE.csv' "入口点,判定,观测窗口,触达画像`r`nstart-dsh.bat,LIVE,90d,桌面双击`r`nself_checks_tests.py,DEAD,90d,无引用`r`n"
     W 'src/calc.js' @'
 'use strict';
@@ -205,6 +205,14 @@ test('边界', () => { t.equal(c.adult(18), true); t.equal(c.adult(17), false); 
     Add-Content -LiteralPath $rp -Value "<!-- 事后加了注释 -->" -Encoding UTF8
     $r6 = Run @('-VerifySeal', '-RunDir', $runDir)
     Chk 'W6 改投影不影响密封（设计如此）' ($r6.rc -eq 0) "rc=$($r6.rc)"
+
+    # W12 A-g4 不是装饰：把界指到"顶层函数 0 个"的件上 ⇒ 必须停在 A/A-g4。
+    #     （真仓 2026-09-28 就是这么挑错件的：dsh-env.py 一行 def 都没有，裁判根本录不出来。）
+    W 'src/no-func.py' "import os`r`nprint(os.getcwd())`r`n"
+    W '_refactor-kit/SCOPE.md' ("# SCOPE`r`n`r`n" + '[scope] IN_SCOPE=src/no-func.py' + "`r`n`r`n## DoD（完成定义）`r`n- 同上`r`n")
+    $r12 = Run ($base + @('-Confirm', 'A'))
+    Chk 'W12 界挑了守不住的件要停在 A-g4' ($r12.rc -eq 1 -and $r12.out -match 'A-g4') "rc=$($r12.rc)"
+    W '_refactor-kit/SCOPE.md' ("# SCOPE`r`n`r`n" + '[scope] IN_SCOPE=src/calc.js' + "`r`n`r`n## DoD（完成定义）`r`n- 重构后 38 用例仍绿且行为差异全部登记`r`n")
 
     # W5 缺 SCOPE.md ⇒ 停在 A 阶段，非零退出
     Remove-Item -LiteralPath (Join-Path $repo '_refactor-kit\SCOPE.md') -Force
