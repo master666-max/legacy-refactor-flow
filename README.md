@@ -99,11 +99,12 @@ git clone https://github.com/master666-max/legacy-refactor-flow.git "$HOME/.dsh/
 | `references/REFACTOR-RUNBOOK.md` | 完整作战手册：阶段细节、出口条件、按语言工具矩阵、提示词模板 |
 | `references/COMMUNITY-MAP.md` | 社区已有方法与流程图、现成工具地图、与 aim42 的对应关系 |
 | `references/EXAMPLE-recon-report.md` | 侦察报告的真实输出样例两份：外部工具在位 / 全缺走兜底 |
-| `tests/run-all.ps1` | 一次跑完四个自检，任一非零即整体非零 |
+| `tests/run-all.ps1` | 一次跑完五项自检，任一非零即整体非零 |
 | `tests/check-mutation.ps1` | 探针自己得能分出强弱：9 变异点夹具，强/弱两套测试集比**序** |
 | `tests/check-encoding.ps1` | 编码不变量：每个 `.ps1` 恰好一个 BOM、自带码页守卫；含**哨兵** |
 | `tests/check-ledger-lifecycle.ps1` | 台账工具 14 步全生命周期，含"没拆必须拦"的反向用例 |
 | `tests/check-recon.ps1` | 侦察报告 12 条断言，期望值写死在自检里、不取自被测输出 |
+| `tests/pre-registration/` | 预注册实验 R1 的仪器（给真仓自造特征测试再量它有多强）。**需要外部靶仓**，故不接进 `run-all`，克隆后跑自测复现不了它的读数 |
 
 ## 自检
 
@@ -114,7 +115,8 @@ pwsh -NoProfile -File tests/run-all.ps1           # 也可以；但在 Windows �
 
 `run-all` 在 Windows 上一律用 `powershell`（5.1）起子进程——编码故障只在该环境成立，宿主是 pwsh 也不例外。非 Windows 才退到 `pwsh`，此时编码哨兵无从复现，会记 SKIP 而不是假装通过。
 
-四个自检都在 `%TEMP%` 里造一次性沙箱跑，**不碰你的仓库**，跑完即删（加 `-KeepSandbox` 保留现场）。当前规模：编码不变量（8 个 `.ps1`）+ 台账 40 项 + 侦察 14 项 + 探针 8 项。
+五项自检都在 `%TEMP%` 里造一次性沙箱跑，**不碰你的仓库**，跑完即删（加 `-KeepSandbox` 保留现场）。
+当前规模（2026-09-28 `run-all.ps1` rc=0 当场读数）：编码不变量（10 个 `.ps1`，逐个剥 BOM 证伪一次）+ 台账 41 项 + 侦察 17 项 + 探针 13 项 + 工作流 17 项。
 
 自检本身也要能被证伪，否则就是恒真的绿灯。五条反向对照（本机实测）：
 
@@ -150,6 +152,17 @@ pwsh -NoProfile -File tests/run-all.ps1           # 也可以；但在 Windows �
 `.gitattributes` 里的 `*.ps1 text eol=crlf` **只管换行符，不管编码**，管不住第一行那条。
 
 ## 变更记录
+
+### v1.5.1（2026-09-28）—— R1 的仪器入库，并顺手逮到 README 自己数错了
+
+预注册实验 R1（"AI 自造的特征测试当裁判够不够格"）拿到第一份有效读数 `score=0.15`，但仪器当时只存在于 `%TEMP%`——
+那等于结论不可复算。本轮把三份 `.py` 装进 `tests/pre-registration/` 并**原样重跑一遍**：
+机器行五项（`score/killed/total/avail/uncov`）逐字复现，而漏斗计数不复现（录制 151/150、丢 6/7、丢 4/2，
+两跑都收在 141 是巧合）。复算能跑通本身又改了一处代码：一次性版本把 unittest 模块名写成了 `char_dsh_env`，
+现按文件名推导。详见该目录 README。
+
+顺带更正 README 自己两处陈旧计数（都实测过才改）：`run-all` 是**五**项不是四项；自检规模那行还停在
+"8 个 `.ps1` / 台账 40 / 侦察 14 / 探针 8"，当场读数是 **10 个 `.ps1` / 41 / 17 / 13 / 17**。
 
 ### v1.5（2026-09-28）—— 同一套流程包成"可执行门 + 密封产物"的工作流形态，供用户选
 
